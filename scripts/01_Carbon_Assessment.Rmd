@@ -1,0 +1,206 @@
+---
+title: "Carbon Data Exploration"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.width = 8, fig.height = 6)
+library(knitr)
+library(tidyverse)
+```
+
+## Environmental Monitoring System: Carbon (Inorganic and Organic)
+
+```{r read_data}
+setwd(here::here())
+d = vroom::vroom('data/ems_all_carbon_records.csv')
+```
+
+### Number of Records with Location Information (lat/long columns)
+
+```{r}
+d = d |> 
+  dplyr::mutate(has_coord_info = !is.na(LATITUDE) & !is.na(LONGITUDE))
+
+d |> 
+  count(has_coord_info) |> 
+  kable()
+```
+
+We'll remove the `r nrow(d[!d$has_coord_info,])` rows without coordinate info.
+
+```{r remove_coord_less_rows}
+d = d |> 
+  dplyr::filter(has_coord_info) |> 
+  dplyr::select(-has_coord_info)
+```
+
+### Number of Records by Parameter and Unit
+
+```{r}
+param_count = d |> 
+  dplyr::count(PARAMETER, UNIT, sort = T) 
+  
+param_count |> 
+  knitr::kable()
+```
+
+Let's remove data rows that display carbon as a percentage. Apparently ug/g and mg/L are identical units (according to a quick Google), so we can retain these two unit types.
+
+```{r drop_percentage_records}
+d = d |> 
+  dplyr::filter(UNIT != '%')
+```
+
+### Data Distribution by Parameter
+
+```{r}
+d |> 
+  left_join(param_count) |> 
+  dplyr::mutate(PARAMETER = paste0(PARAMETER,'\n(',n,' records)')) |> 
+  ggplot(aes(x = PARAMETER, y = RESULT)) + 
+  geom_violin() + 
+  facet_wrap( ~ PARAMETER, scales = 'free')
+```
+
+We could calculate the 99% confidence interval for each of these parameters to see which data points are likely outliers that could be filtered out.
+
+```{r}
+# Use linear models to calculate the 98% confidence interval for each parameter separately.
+bounds = d |> 
+  dplyr::select(PARAMETER) |> 
+  distinct() |> 
+  pull(PARAMETER) |> 
+  map( ~ {
+    res = confint(lm(RESULT ~ 1, d[d$PARAMETER == .x,]), level = 0.98) |> 
+      as_tibble()
+    
+    names(res) = c("perc_1","perc_99")
+    
+    res |> 
+      dplyr::mutate(PARAMETER = .x) |> 
+      dplyr::select(PARAMETER, everything())
+  }) |> 
+  dplyr::bind_rows()
+
+kable(bounds |> 
+        dplyr::rename("1%" = perc_1,
+                      "99%" = perc_99))
+```
+
+If we use the upper confidence interval to filter out records with extremely high values, what does that do to our sample number?
+
+```{r}
+d_f = d |> 
+  dplyr::left_join(bounds) |> 
+  dplyr::filter(RESULT <= perc_99)
+
+d |> 
+  count(PARAMETER, name = 'pre_filtering') |> 
+  dplyr::left_join(
+    d_f |> 
+      count(PARAMETER, name = 'post_filtering')
+  ) |> 
+  dplyr::mutate(percent_change = paste0(-round(100*((pre_filtering - post_filtering)/pre_filtering),2),'%')) |> 
+  knitr::kable()
+```
+
+4. Visual Assessment of Data across B.C.
+```{r point_map}
+library(sf)
+d_sf = d_f |> 
+  st_as_sf(
+    coords = c("LONGITUDE","LATITUDE"),
+    crs = 4326
+  )
+
+bc = bcmaps::bc_bound() |> dplyr::summarise(in_bc = T)
+
+# Grid the points and count.
+ggplot() + 
+  geom_sf(data = bc) + 
+  geom_sf(data = d_sf)
+```
+
+```{r spatial_match_to_BC}
+d_in_bc = d_sf |> 
+  st_transform(3005) |> 
+  st_join(bc) |> 
+  dplyr::filter(in_bc)
+```
+
+Let's remove points that fall outside of the province (`r round(100*(1-nrow(d_in_bc)/nrow(d_sf)),2)`% of points will be removed).
+
+What is the spatial distribution of each of these four parameters like?
+
+```{r grid_points}
+bc_grid = st_make_grid(x = bc,
+                       n = 20) |> 
+  st_as_sf() |> 
+  dplyr::mutate(grid_id = row_number()) |> 
+  dplyr::rename(geometry = x)
+
+bc_grid = sf::st_intersection(bc_grid, bc)
+
+cell_recs = st_join(
+  d_in_bc,
+  bc_grid
+) |> 
+  sf::st_drop_geometry() |> 
+  dplyr::group_by(grid_id,PARAMETER) |> 
+  dplyr::summarise(recs_in_cell = n()) |> 
+  ungroup()
+
+bc_grid = bc_grid |> 
+  dplyr::left_join(cell_recs)
+
+# Remove NA grids that matched nothing.
+bc_grid = bc_grid |> 
+  dplyr::filter(!is.na(PARAMETER))
+
+ggplot() + 
+  geom_sf(data = bc) + 
+  geom_sf(data = bc_grid, aes(fill = log(recs_in_cell))) + 
+  scale_fill_viridis_b() + 
+  facet_wrap( ~ PARAMETER)
+```
+
+There's quite a concentration of records in south-eastern BC.
+
+### Spatial Interpolation of Carbon
+
+```{r}
+library(terra)
+d_cdo = d_in_bc |> dplyr::filter(PARAMETER == 'Carbon Dissolved Organic')
+
+bc_r = rast(bc, nrow = 300, ncol = 300)
+bc_r$val = 1
+bc_r = mask(bc_r, vect(bc))
+plot(bc_r)
+
+# d_r = terra::rasterize(test_v,bc_r,"RESULT")
+# 
+# plot(d_r)
+
+library(gstat)
+d_formula <- gstat(id = "RESULT", formula = RESULT~1, data=d_cdo,  nmax=7, set=list(idp = .5))
+
+interpolate_gstat <- function(model, x, crs, ...) {
+	v <- st_as_sf(x, coords=c("x", "y"), crs=crs)
+	p <- predict(model, v, ...)
+	as.data.frame(p)[,1:2]
+}
+
+zsf <- interpolate(bc_r, d_formula, debug.level=0, fun=interpolate_gstat, crs=crs(bc_r), index=1)
+zsf = mask(zsf, vect(bc))
+plot(zsf)
+
+bc_m = bc_r
+bc_m$val = 1
+
+zsf <- crop(zsf, bc_r)
+plot(zsf, main = 'Gstat Interpolation')
+```
+

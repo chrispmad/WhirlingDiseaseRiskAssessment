@@ -1,0 +1,452 @@
+---
+title: "Columbia River Watershed T tubifex Suitability Assessment"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.width = 8, fig.height = 6)
+library(knitr)
+library(tidyverse)
+library(sf)
+library(fwapgr)
+library(fwatlasbc)
+library(bcdata)
+library(terra)
+library(whitebox)
+
+# If first time running whitebox, use 'install_whitebox()'
+wbt_init()
+```
+
+```{r download_data}
+col = sf::read_sf('W:/CMadsen/shared_data_sets/Columbia_River_Big_Watershed.gpkg') |> 
+  dplyr::mutate(row_id = row_number()) |> 
+  dplyr::mutate(MAJOR_WA_1 = ifelse(row_id == 10, "Pend-d'Oreille River West", MAJOR_WA_1)) |> 
+  dplyr::mutate(MAJOR_WA_1 = ifelse(row_id == 9, "Pend-d'Oreille River East", MAJOR_WA_1)) |> 
+  dplyr::group_by(MAJOR_WA_1) |> 
+  dplyr::summarise()
+
+unique_watershed_names = unique(col$MAJOR_WA_1)
+
+# If we have not yet downloaded the streams for these areas,
+# download them here.
+if(!dir.exists('data/streams')){
+  dir.create('data/streams')
+}
+if(!file.exists('data/streams/streams_columbia_river.gpkg')){
+
+  unique_watershed_names |> 
+    purrr::iwalk( ~ {
+      this_watershed = col[col$MAJOR_WA_1 == .x,]
+      this_watershed_label = snakecase::to_snake_case(this_watershed$MAJOR_WA_1)
+      
+      streams_dl = bcdata::bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+        bcdata::filter(STREAM_ORDER >= 2) |> 
+        bcdata::filter(bcdata::INTERSECTS(this_watershed)) |> 
+        bcdata::collect()
+      
+      sf::write_sf(streams_dl, paste0('data/streams/streams_',this_watershed_label,'.gpkg'))
+      print(paste0("Finished ",this_watershed$MAJOR_WA_1))
+    })
+} 
+
+# ELEVATION
+
+if(!file.exists('data/Columbia_River_Big_Watershed_elevation.tif')){
+# Snag elevation at start and end points for each stream.
+col_elev = elevatr::get_elev_raster(dplyr::summarise(col),
+                                    z = 11)
+col_elev = rast(col_elev)
+terra::writeRaster(col_elev,'data/Columbia_River_Big_Watershed_elevation.tif')
+} else {
+  col_elev = terra::rast('data/Columbia_River_Big_Watershed_elevation.tif')
+}
+```
+
+```{r get_slope_angle_for_streams}
+if(!file.exists('data/ColumbiaWatershed_streams_with_slope_data.gpkg')){
+
+str_d_l = list.files(path = 'data/streams/', pattern = '^streams_.*\\.gpkg', full.names = T)
+
+if(!dir.exists('data/downstream_points')){
+  dir.create('data/downstream_points')
+}
+
+str_w_a = str_d_l |> 
+  map( ~ {
+    
+    watershed_label = stringr::str_squish(stringr::str_replace_all(stringr::str_extract(.x, '_.*\\.'),'(_|\\.)',' '))
+    
+    dat = sf::read_sf(.x) |> 
+      dplyr::mutate(watershed_name = watershed_label)
+    
+    # merge stream pieces by BLK
+    dat = dat |> 
+      sf::st_zm() |> 
+      dplyr::group_by(BLUE_LINE_KEY,watershed_name) |> 
+      dplyr::summarise(LENGTH_METRE = sum(LENGTH_METRE))
+    
+    # Look at data.
+    # ggplot() + geom_sf(data = dat)
+    
+    # Convert stream lines into 2 points: a start point and an end point.
+    dat_b = sf::st_boundary(dat)
+    
+    # Look at output.
+    # ggplot() + geom_sf(data = dat) + geom_sf(data = dat_b, col = 'purple')
+    
+    # Split stream start and end points into two separate rows.
+    dat_p = sf::st_cast(dat_b, 'POINT')
+    
+    # Pull elevation out of raster at each point.
+    dat_p$elev = extract(col_elev, vect(dat_p))
+    
+    # Find which point is the lower elevation point (downstream/rio abajo),
+    # and save that to a folder.
+    dat_p_ds = dat_p |> 
+      dplyr::group_by(BLUE_LINE_KEY) |> 
+      dplyr::arrange(elev) |> 
+      dplyr::slice(1) |> 
+      dplyr::ungroup()
+    
+    sf::write_sf(dat_p_ds,
+                 paste0('data/downstream_points/',watershed_label,'_downstream_points.gpkg'))
+    
+    dat_s = dat_p |>
+      dplyr::group_by(BLUE_LINE_KEY,LENGTH_METRE) |>
+      dplyr::summarise(
+        max_elev = max(elev),
+        min_elev = min(elev),
+        elev_change = max_elev - min_elev) |>
+      dplyr::ungroup()
+
+    # ggplot() +
+    #   geom_sf(data = dat) +
+    #   geom_sf(data = dat_s,
+    #           aes(col = max_elev))
+
+    # Calculate slope of stream
+    dat_w_ang = dat_s |>
+      dplyr::mutate(rise_over_run = (max_elev-min_elev)/LENGTH_METRE) |>
+      dplyr::mutate(slope_angle = atan(rise_over_run))
+
+    dat = dat |>
+      dplyr::left_join(dat_w_ang |>
+                         sf::st_drop_geometry() |>
+                         dplyr::select(BLUE_LINE_KEY,rise_over_run,slope_angle))
+
+    dat
+  }) |> 
+  dplyr::bind_rows()
+
+ggplot() + 
+  geom_sf(data = str_w_a,
+          aes(col = slope_angle))
+
+# Write out streams with angle info in Columbia River Big Watershed Area to disk!
+sf::write_sf(str_w_a,
+             'data/ColumbiaWatershed_streams_with_slope_data.gpkg')
+} else {
+  str_w_a = sf::read_sf('data/ColumbiaWatershed_streams_with_slope_data.gpkg')
+}
+```
+
+```{r find_contributing_area_with_sf}
+elevation_file_names = list.files('data/elevation_rasters',
+           pattern = '_elev.tif',
+           full.names = T)
+
+downstream_point_file_names = list.files('data/downstream_points',
+           pattern = 'points.gpkg',
+           full.names = T)
+
+el = terra::rast(elevation_file_names[1])
+
+p = sf::read_sf(downstream_point_file_names[1])
+
+# convert elevation raster into polygons of 'floor' elevation values (e.g. 0, 10, 20m, etc.)
+el[] <- (values(el) %/% 20) * 20
+
+el[el <= 0] <- 0
+
+el_p = as.polygons(test)
+
+el_p = st_as_sf(el_p)
+
+el_p = st_transform(el_p, 3005)
+
+ggplot() + geom_sf(data = el_p[el_p$elevation == 60,])
+
+# Split polygons that are NOT touching into separate rows.
+el_p_split = el_p |> 
+  # Homogenize geometry type to MULTIPOLYGON...
+  st_cast('MULTIPOLYGON') |> 
+  # Split out separate, non-touching polygons into separate rows.
+  st_cast('POLYGON')
+
+# Try to find some points.
+el_p_intersect_row = sf::st_intersects(
+  p[1,],
+  el_p_split
+)
+
+# See which polygons of greater elevation touch th
+
+unlist(el_p_intersect_row)
+
+ggplot() + 
+  geom_sf(data = el_p)
+
+el_p_split |> 
+  dplyr::group_by(elevation) |> 
+  dplyr::summarise(geometry = st_union(geometry))
+
+map[unlist(el_p_intersect_row), "NAME",
+                       drop = TRUE]
+
+el_p[el_p_intersect_row,]
+```
+
+```{r find_contributing_area}
+# Simplify the elevation raster, 'flooring' the values by 10
+# (e.g. a value of 6 becomes 0, a value of 12 becomes 10, and a value of 21 becomes 20).
+# 
+# vic_test = st_as_sf(data.frame(
+#   lng = -120,
+#   lat = 49),
+#   coords = c('lng','lat'),
+#   crs = 4326
+# ) |> 
+#   st_transform(3005) |> 
+#   st_buffer(10000) |> 
+#   st_bbox() |> 
+#   st_as_sfc() |> 
+#   st_transform(4326)
+# 
+# test = elevatr::get_aws_terrain(
+#   vic_test, z = 4, prj = st_crs(vic_test)
+# )
+# 
+# names(test) <- 'elevation'
+# 
+# plot(test)
+# 
+# test[] <- (values(test) %/% 20) * 20
+# 
+# test[test <= 0] <- 0
+# 
+# # plot(test)
+# 
+# test_c = as.polygons(test)
+# 
+# test_sf = st_as_sf(test_c)
+# 
+# # test_fd = terrain(test, v = 'flowdir')
+# 
+# # ggplot() + geom_sf(data = test_sf, aes(fill = elevation, col = elevation))
+# 
+# # Place a point on the map, try to find all polygons that are higher in value and 
+# # touch our polygon.
+# test_p = data.frame(lat = 50, lng = -115) |> 
+#   st_as_sf(coords = c('lng','lat'),
+#            crs = 4326)
+# 
+# ggplot() +
+#   geom_sf(data = test_sf, aes(fill = elevation, col = elevation)) +
+#   geom_sf(data = test_p, col = 'red')
+# 
+# test_p$elev = extract(test, test_p)$elevation
+# 
+# higher_elevation_bands = test_sf |> 
+#   dplyr::filter(elevation >= test_p$elev)
+# 
+# ggplot() + geom_sf(data = higher_elevation_bands)
+```
+
+```{r attempting_to_delineate_contributing_areas_with_fwaprg}
+
+# test_max = fwapgr::fwa_watershed_at_measure(
+#   str_w_a$BLUE_LINE_KEY[10],
+#   downstream_route_measure = str_w_a$LENGTH_METRE[1]
+# )
+# 
+# test_0 = fwapgr::fwa_watershed_at_measure(
+#   str_w_a$BLUE_LINE_KEY[10],
+#   downstream_route_measure = 1
+# )
+# 
+# ggplot() + 
+#   geom_sf(data = test_max, fill = 'purple', alpha = 0.50) +
+#   geom_sf(data = test_0, fill = 'red', alpha = 0.25) +
+#   geom_sf(data = str_w_a[10,])
+```
+
+```{r split_elevation_raster_by_watersheds}
+if(!dir.exists('data/elevation_rasters')){
+  dir.create('data/elevation_rasters')
+}
+
+if(!file.exists('data/elevation_rasters/columbia_river_elev.tif')){
+col$MAJOR_WA_1 |> 
+  iwalk( ~ {
+
+    this_ws = col[col$MAJOR_WA_1 == .x,]
+    
+    this_watershed_label = snakecase::to_snake_case(this_ws$MAJOR_WA_1)
+
+    col_cropped = mask(crop(col_elev,this_ws),this_ws)
+    
+    col_agg = terra::aggregate(col_cropped, fact = 2)
+    
+    writeRaster(col_agg, paste0('data/elevation_rasters/',this_watershed_label,'_elev.tif'),
+                overwrite = TRUE)
+  })
+}
+  
+```
+
+```{r delineate_contributing_areas_with_whitebox}
+# The below are the steps necessary to delineate watersheds.
+# 1. Read in DEM
+# 2. Fill single cell sinks then breach breach larger sinks
+# 3. Create D8 flow accumulation and D8 pointer grids
+# 4. Read in pour points
+# 5. Create stream raster
+# 6. Snap pour points to stream raster
+# 7. *Run watershed function
+
+if(!dir.exists('data/hillshades/')){
+  dir.create('data/hillshades/')
+}
+
+if(!file.exists('data/hillshades/okanagan_river_hillshade.tif')){
+  
+  elev_r_names = list.files(path = 'data/elevation_rasters/',
+           pattern = '.tif')
+  
+  elev_r_names |> 
+    iwalk( ~ {
+      label = paste0(str_remove(.x,'_elev.tif'),'_hillshade.tif')
+      wbt_hillshade(dem = paste0("data/elevation_rasters/",.x),
+                    output = paste0("data/hillshades/",label),
+                    azimuth = 115)
+    })
+}
+
+# hillshade = rast("data/hillshades/columbia_river_hillshade.tif")
+#  
+# library(tmap)
+#  
+# tm_shape(hillshade)+
+#   tm_raster(style = "cont",palette = "-Greys", legend.show = FALSE)+
+#   tm_scale_bar()
+
+if(!dir.exists('data/prepped_dems/')){
+  dir.create('data/prepped_dems/')
+}
+
+# Prepped DEM (filled and breached...)
+if(!file.exists('data/prepped_dems/okanagan_river_prepped_dem.tif')){
+  
+  elev_r_names = list.files(path = 'data/elevation_rasters/',
+           pattern = '.tif')
+  
+  elev_r_names |> 
+    iwalk( ~ {
+      label = paste0(str_remove(.x,'_elev.tif'),'_prepped_dem.tif')
+      print('step 1...')
+      # Step 1...
+      wbt_fill_single_cell_pits(
+        dem = paste0("data/elevation_rasters/",.x),
+        output = paste0("data/prepped_dems/",label) 
+      )
+      print('step 2...')
+      #Step 2...
+      wbt_breach_depressions_least_cost(
+        dem = paste0("data/prepped_dems/",label),
+        output = paste0("data/prepped_dems/",label),
+        dist = 5,
+        fill = TRUE)
+      print('step 3...')
+      #Step 3...
+      wbt_fill_depressions_wang_and_liu(
+        dem = paste0("data/prepped_dems/",label),
+        output = paste0("data/prepped_dems/",label)
+      )
+    })
+}
+
+# Flow Accumulation...
+if(!dir.exists('data/flow_accumulation/')){
+  dir.create('data/flow_accumulation/')
+}
+
+if(!file.exists('data/flow_accumulation/okanagan_river_flow_accumulation.tif')){
+  
+  prepped_dem_names = list.files(path = 'data/prepped_dems/',
+           pattern = '.tif')
+  
+  prepped_dem_names |> 
+    iwalk( ~ {
+      label = paste0(str_remove(.x,'_prepped_dem.tif'),'_D8_flow_accumulation.tif')
+      wbt_d8_flow_accumulation(
+        input = paste0("data/prepped_dems/",.x),
+        output = paste0("data/flow_accumulation/",label)
+      )
+    })
+}
+
+# Pointer Grids...
+if(!dir.exists('data/pointer_grids/')){
+  dir.create('data/pointer_grids/')
+}
+
+if(!file.exists('data/pointer_grids/okanagan_river_D8_pointer_grid.tif')){
+  
+  prepped_dem_names = list.files(path = 'data/prepped_dems/',
+           pattern = '.tif')
+  
+  prepped_dem_names |> 
+    iwalk( ~ {
+      label = paste0(str_remove(.x,'_prepped_dem.tif'),'_D8_pointer_grid.tif')
+      wbt_d8_flow_accumulation(
+        input = paste0("data/prepped_dems/",.x),
+        output = paste0("data/pointer_grids/",label)
+      )
+    })
+}
+
+# Test pour points.
+test_p = str_w_a[str_w_a$watershed_name == 'kicking horse river',]
+
+test_b = sf::st_boundary(test_p)
+
+test_bb = sf::st_cast(test_b, 'POINT') |> 
+  dplyr::mutate(odd = row_number() %% 2 == 1)
+
+ggplot() + 
+  geom_sf(data = test_p) + 
+  geom_sf(data = test_bb, aes(col = odd))
+
+leaflet() |> 
+  addPolylines(data = st_transform(test_p, 4326)) |> 
+  addCircleMarkers(data = st_transform(test_bb,4326),
+                   color = ~colorFactor(palette = 'Spectral',
+                                       domain = c(TRUE,FALSE))(odd),
+                   radius = 1) |> 
+  addLegend(pal = colorFactor(palette = 'Spectral',
+                                       domain = c(TRUE,FALSE)), 
+            values = c(T,F))
+
+
+sf::write_sf(test_bb, 'data/test_points.shp')
+
+wbt_watershed(d8_pntr = "data/pointer_grids/columbia_river_D8_pointer_grid.tif",
+              pour_pts = 'data/test_points.shp',
+              output = "output/brush_watersheds.tif")
+
+
+```
+
