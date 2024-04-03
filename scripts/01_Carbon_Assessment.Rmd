@@ -171,36 +171,37 @@ There's quite a concentration of records in south-eastern BC.
 
 ### Spatial Interpolation of Carbon
 
-```{r}
-library(terra)
-d_cdo = d_in_bc |> dplyr::filter(PARAMETER == 'Carbon Dissolved Organic')
-
-bc_r = rast(bc, nrow = 300, ncol = 300)
-bc_r$val = 1
-bc_r = mask(bc_r, vect(bc))
-plot(bc_r)
-
-# d_r = terra::rasterize(test_v,bc_r,"RESULT")
+```{r write_point_data_to_disk}
+sf::write_sf(d_in_bc, paste0(here::here(),'/data/EMS_carbon_data_in_BC.gpkg'))
+# library(terra)
+# d_cdo = d_in_bc |> dplyr::filter(PARAMETER == 'Carbon Dissolved Organic')
 # 
-# plot(d_r)
-
-library(gstat)
-d_formula <- gstat(id = "RESULT", formula = RESULT~1, data=d_cdo,  nmax=7, set=list(idp = .5))
-
-interpolate_gstat <- function(model, x, crs, ...) {
-	v <- st_as_sf(x, coords=c("x", "y"), crs=crs)
-	p <- predict(model, v, ...)
-	as.data.frame(p)[,1:2]
-}
-
-zsf <- interpolate(bc_r, d_formula, debug.level=0, fun=interpolate_gstat, crs=crs(bc_r), index=1)
-zsf = mask(zsf, vect(bc))
-plot(zsf)
-
-bc_m = bc_r
-bc_m$val = 1
-
-zsf <- crop(zsf, bc_r)
-plot(zsf, main = 'Gstat Interpolation')
+# bc_r = rast(bc, nrow = 300, ncol = 300)
+# bc_r$val = 1
+# bc_r = mask(bc_r, vect(bc))
+# plot(bc_r)
+# 
+# # d_r = terra::rasterize(test_v,bc_r,"RESULT")
+# # 
+# # plot(d_r)
+# 
+# library(gstat)
+# d_formula <- gstat(id = "RESULT", formula = RESULT~1, data=d_cdo,  nmax=7, set=list(idp = .5))
+# 
+# interpolate_gstat <- function(model, x, crs, ...) {
+# 	v <- st_as_sf(x, coords=c("x", "y"), crs=crs)
+# 	p <- predict(model, v, ...)
+# 	as.data.frame(p)[,1:2]
+# }
+# 
+# zsf <- interpolate(bc_r, d_formula, debug.level=0, fun=interpolate_gstat, crs=crs(bc_r), index=1)
+# zsf = mask(zsf, vect(bc))
+# plot(zsf)
+# 
+# bc_m = bc_r
+# bc_m$val = 1
+# 
+# zsf <- crop(zsf, bc_r)
+# plot(zsf, main = 'Gstat Interpolation')
 ```
 
