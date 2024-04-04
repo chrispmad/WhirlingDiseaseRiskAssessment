@@ -7,22 +7,28 @@ editor_options:
   chunk_output_type: console
 ---
 
-```{r}
-# ```{css, echo=FALSE}
-# 
-# .Wrap {
-#  max-width: 100%;
-# }
-# 
-# .Content {
-#  padding: 0 5px 0 10px;
-# }
-# 
-# .leaflet-popup-content {
-#  width: 400px !important;
-# }
-# 
-# ```
+```{css, echo=FALSE}
+
+.Wrap {
+max-width: 100%;
+}
+
+.page-inner {
+  padding: 40px 0px 0px 0px !important;
+}
+
+.page-inner-section {
+  padding: 40px 0px 0px 0px;
+}
+
+.Content {
+padding: 0 5px 0 10px;
+}
+
+.leaflet-popup-content {
+width: 400px !important;
+}
+
 ```
 
 ```{r setup, include=FALSE}
@@ -1042,8 +1048,7 @@ ggplot() +
   geom_sf(data = col_s, fill = 'transparent') + 
   scale_fill_gradient(low = 'white', high = 'red') + 
   ggthemes::theme_map() + 
-  labs(title = '*T. tubifex* predicted density based on stream slope and contributing area',
-       subtitle = 'Adjusted for Inorganic Carbon Percentage, where data available',
+  labs(title = '*T. tubifex* predicted density adjusted for Inorganic Carbon %',
        fill = 'T. tubifex/m^2^') + 
   theme(legend.position = 'right',
         legend.title = ggtext::element_markdown(),
@@ -1096,47 +1101,88 @@ str_d_wgs = str_d_wgs |>
   tidyr::fill(GNIS_NAME, .direction = 'downup') |> 
   dplyr::ungroup()
 
-str_col_pal = leaflet::colorNumeric(palette = 'Spectral',
-                                    domain = str_d_wgs$tubifex_density_m2,
-                                    reverse = T)
+# Bin the streams based on predicted tubifex density.
+str_d_wgs = str_d_wgs |> 
+  dplyr::mutate(tubifex_bin = as.numeric(cut(tubifex_density_m2,4)))
 
-str_popup_table = leafpop::popupTable(
-  str_d_wgs |>
-    sf::st_drop_geometry() |>
-    dplyr::select(Name = GNIS_NAME,
-                  BLK,
-                  Slope = slope_angle,
-                  `Contributing Area (km^2)` = contrib_area_pred_km2,
-                  `Predicted Density` = tubifex_density_m2)
-)
+# Find out what the bin boundaries are.
+bin_boundaries = unique(cut(str_d_wgs$tubifex_density_m2, 4))
 
-leaflet() |>
-  addProviderTiles(providers$CartoDB) |>
-  addPolylines(
-    data = str_d_wgs,
-    label = ~paste0(ifelse(!is.na(GNIS_NAME), GNIS_NAME, 'No Name')),
-    popup = ~lapply(str_popup_table, htmltools::HTML),
-    color = ~str_col_pal(tubifex_density_m2)
-  ) |>
+bbounds = data.frame(bounds = bin_boundaries[order(bin_boundaries)]) |> 
+  dplyr::mutate(bounds = stringr::str_replace_all(bounds, "-0.*,", "0 <= x <= ")) |> 
+  dplyr::mutate(bounds = stringr::str_remove_all(bounds, "(\\(|\\])")) |> 
+  dplyr::mutate(bounds = stringr::str_replace_all(bounds, ",", " < x <= "))
+
+str_col_pal = leaflet::colorFactor(palette = 'Spectral', reverse = TRUE, domain = c(1:max(str_d_wgs$tubifex_bin)), levels = c(1:max(str_d_wgs$tubifex_bin)))
+
+# str_col_pal = leaflet::colorNumeric(palette = 'Spectral',
+#                                     domain = str_d_wgs$tubifex_density_m2,
+#                                     reverse = T)
+
+# str_popup_table = leafpop::popupTable(
+#   str_d_wgs |>
+#     sf::st_drop_geometry() |>
+#     dplyr::select(Name = GNIS_NAME,
+#                   BLK,
+#                   Slope = slope_angle,
+#                   `Contributing Area (km^2)` = contrib_area_pred_km2,
+#                   `Predicted Density` = tubifex_density_m2)
+# )
+
+l = leaflet() |>
+  addProviderTiles(providers$CartoDB) |> 
+  addMapPane(name = 'pane_1', zIndex = 300) |> 
+  addMapPane(name = 'pane_2', zIndex = 350) |> 
+  addMapPane(name = 'pane_3', zIndex = 400) |> 
+  addMapPane(name = 'pane_4', zIndex = 450)
+  
+for(i in 1:max(str_d_wgs$tubifex_bin)){
+  these_popup_tables = leafpop::popupTable(
+    str_d_wgs |>
+      dplyr::filter(tubifex_bin == i) |> 
+      sf::st_drop_geometry() |>
+      dplyr::select(Name = GNIS_NAME,
+                    BLK,
+                    Slope = slope_angle,
+                    `Contributing Area (km^2)` = contrib_area_pred_km2,
+                    `Predicted Density` = tubifex_density_m2)
+  )
+  
+  l = l |> 
+    addPolylines(
+      data = str_d_wgs[str_d_wgs$tubifex_bin == i,],
+      label = ~paste0(ifelse(!is.na(GNIS_NAME), GNIS_NAME, 'No Name')),
+      popup = ~lapply(these_popup_tables, htmltools::HTML),
+      color = ~str_col_pal(tubifex_bin),
+      group = paste0('bin_',i),
+      options = pathOptions(pane = paste0('pane_',i))
+    )
+}
+
+# addPolylines(
+#     data = str_d_wgs,
+#     label = ~paste0(ifelse(!is.na(GNIS_NAME), GNIS_NAME, 'No Name')),
+#     popup = ~lapply(str_popup_table, htmltools::HTML),
+#     color = ~str_col_pal(tubifex_density_m2)
+#   ) |>
+l |>
   addLegend(
-    title = '<em>T. tubifex</em><br>predicted<br> density<br>(indivs/m<sup>2</sup>)',
-    pal = leaflet::colorNumeric(palette = 'Spectral',
-                                    domain = str_d_wgs$tubifex_density_m2),
-    values = str_d_wgs$tubifex_density_m2,
-    labFormat = labelFormat(transform = function(x) sort(x, decreasing = TRUE))
+    title = '<em>T. tubifex</em><br>predicted<br> density<br>',
+    pal = leaflet::colorFactor(
+      palette = 'Spectral', 
+      reverse = TRUE, 
+      domain = c(1:max(str_d_wgs$tubifex_bin)), 
+      levels = c(1:max(str_d_wgs$tubifex_bin))),
+    values = c(1:4),
+    labFormat = function(type, cuts, p) {
+      paste0(bbounds$bounds)
+    }
   ) |>
   addScaleBar() |> 
-  leaflet.extras::addResetMapButton()
+  leaflet.extras::addResetMapButton() |> 
+  leaflet::addLayersControl(
+    overlayGroups = c('bin_1','bin_2','bin_3','bin_4'),
+    options = layersControlOptions(collapsed = FALSE)
+  )
 
-# library(ggiraph)
-# gg_point = ggplot(str_d_wgs[c(1:100),]) + 
-#   geom_sf_interactive(
-#     aes(
-#       col = tubifex_density_m2,
-#       tooltip = tubifex_density_m2,
-#       data_id = tubifex_density_m2
-#     )
-#   )
-# 
-# girafe(ggobj = gg_point)
 ```
