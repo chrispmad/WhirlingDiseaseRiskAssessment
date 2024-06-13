@@ -46,6 +46,7 @@ library(whitebox)
 library(patchwork)
 library(tidyterra)
 library(leaflet)
+library(plotly)
 
 # If first time running whitebox, use 'install_whitebox()'
 wbt_init()
@@ -483,6 +484,62 @@ p3 +
 ```{r}
 p5 + 
   labs(subtitle = "with {terra} function extract()")
+```
+
+#### Interactive Stream Visualization
+
+```{r}
+# Get version of eg stream that has elevation built in...
+eg_stream_with_elev = bcdc_query_geodata('freshwater-atlas-stream-network') |>
+  filter(BLUE_LINE_KEY == 356364747) |>
+  collect() |>
+  dplyr::summarise()
+
+# Extract linestrings from eg stream with elevation
+linestrings <- st_cast(eg_stream_with_elev, "LINESTRING")
+
+points_df = linestrings |> 
+  dplyr::mutate(linestring_id = row_number()) |> 
+  group_by(linestring_id) |> 
+  st_coordinates() |> 
+  as_tibble() |> 
+  dplyr::rename(x=X,y=Y,z=Z,linestring_id = L1)
+
+xy_elevation <- as.data.frame(terra::aggregate(elev_for_eg_stream,10), xy = TRUE) |> 
+  dplyr::mutate(height = elevation,
+                elevation = elevation - 10)
+
+# Get the default camera settings
+default_camera <- list(
+  eye = list(x = NULL, y = NULL, z = NULL),
+  center = list(x = NULL, y = NULL, z = NULL),
+  up = list(x = NULL, y = NULL, z = NULL),
+  projection = list(type = NULL, scale = NULL)
+)
+
+# Adjust only the rotation angle in the X dimension
+rotation_x <- 90  # Rotate 90 degrees in the X direction
+
+# Modify the default camera settings with the rotation angle
+modified_camera <- default_camera
+modified_camera$eye$x <- -0.8  # Rotate 90 degrees in the X direction
+
+points_df |>
+  plotly::plot_ly(x = ~x, y = ~y, z = ~z) |> 
+  group_by(linestring_id) |> 
+  plotly::add_paths(x = ~x, y = ~y, z = ~z, line = list(width = 5)) |> 
+  plotly::add_mesh(data = xy_elevation, 
+           x = ~x, y = ~y, 
+           z = ~(elevation-10),
+           text = ~height) |> 
+  plotly::layout(
+    scene = list(
+      zaxis = list(range = c(0,max(xy_elevation$elevation))),
+      camera = modified_camera
+    ),
+    dragmode = 'turntable'
+  )
+
 ```
 
 #### Streams with Slope \<= 4%
@@ -1060,3 +1117,10 @@ l = l |>
 
 l
 ```
+
+```{r save_probability_raster_to_disk}
+names(tub_prob_w_carbon) <- "predicted_tubifex_density"
+terra::writeRaster(tub_prob_w_carbon, 'output/Predicted_Ttubifex_density.tif',
+                   overwrite = TRUE)
+```
+
