@@ -1,0 +1,149 @@
+---
+title: "IMDP Destination Waterbodies"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = F, warning = F, fig.width = 10, fig.height = 6)
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(DT)
+library(terra)
+```
+
+Note: These IMDP inspection records span the period from the start of the 2015 season to 2024-06-13.
+
+```{r load_data}
+insp = read_sf('W:/CMadsen/Projects/ZQMussels/data/Waterbodies_with_Inspection_Data_Summaries_all_years.gpkg')
+```
+
+```{r clean_data}
+# Get top 50 destination waterbodies
+insp_top = insp |>
+  dplyr::filter(!GNIS_NA %in% c("Dry Storage","Pacific Ocean")) |>
+  dplyr::arrange(dplyr::desc(TotalInspections)) |>
+  dplyr::slice(1:50)
+
+insp_top = st_transform(insp_top, 4326)
+bc = st_transform(bcmaps::bc_bound(), 4326)
+
+insp_top = insp_top |> 
+  dplyr::mutate(colours = as.numeric(cut(TotalInspections,5)),
+                bin_levels = as.character(cut(dig.lab = 8,TotalInspections,5))) |> 
+  dplyr::mutate(bin_levels = stringr::str_remove_all(bin_levels, '(\\(|\\])')) |> 
+  dplyr::mutate(bin_levels = stringr::str_replace(bin_levels, ',', '-')) |> 
+  dplyr::mutate(bin_levels = stringr::str_replace(bin_levels, '\\.[0-9]+', '')) |> 
+  dplyr::mutate(bin_levels = as.factor(bin_levels)) |> 
+  dplyr::mutate(bin_levels = forcats::fct_inorder(bin_levels))
+```
+
+### Plots {.tabset}
+
+#### Static
+```{r ggplot_map}
+
+library(basemaps)
+
+# Expand extent to be 10:6 in terms of width and height
+dims_m = st_bbox(st_transform(insp_top,3005))
+
+dim_h = dims_m[4] - dims_m[2]
+dim_w = 10 * dim_h / 6
+
+midpoint_w = (dims_m[3] + dims_m[1])/2
+
+new_ext = data.frame(x = c(midpoint_w - 0.5 * dim_w,
+                           midpoint_w + 0.5 * dim_w),
+                     y = c(dims_m[2],dims_m[4])) |> 
+  sf::st_as_sf(coords = c('x','y'), crs = 3005) |> 
+  st_transform(4326)
+
+ext = st_bbox(st_transform(insp_top), 3857)
+new_ext = st_bbox(st_transform(new_ext), 3857)
+
+if(interactive()){
+  basemap_filepath = 'data/IMDP_data_demo_carto_db_basemap.tif'
+} else {
+  basemap_filepath = '../data/IMDP_data_demo_carto_db_basemap.tif'
+}
+
+if(!file.exists(basemap_filepath)){
+  bm = basemaps::basemap_raster(ext = new_ext, map_service = 'carto', map_type = 'light') |> 
+    as("SpatRaster") |> 
+    terra::project(terra::crs(terra::vect(bc)))
+  
+  terra::plotRGB(bm)
+  
+  terra::writeRaster(bm, basemap_filepath, overwrite = T)
+} else {
+  bm = terra::rast(basemap_filepath)
+}
+
+ggplot() +
+  tidyterra::geom_spatraster_rgb(data = bm) +
+  geom_sf(data = bc, fill = 'transparent', col = 'grey') +
+  geom_sf(data = insp_top,
+          aes(fill = bin_levels,
+              col = bin_levels)) +
+  coord_sf(xlim = st_bbox(new_ext)[c(1,3)],
+           ylim = st_bbox(new_ext)[c(2,4)]) + 
+  ggthemes::theme_map() + 
+  labs(fill = 'Num. Insp. Bin', col = 'Num. Insp. Bin',
+       title = 'Bins of number of total inspected watercraft destined for waterbodies in B.C.',
+       subtitle = 'top 50 destinations included in this map') + 
+  ggspatial::annotation_scale(location = 'br')
+```
+
+#### Interactive
+```{r leaflet_map}
+
+popup_tbls = insp_top |> 
+  sf::st_drop_geometry() |> 
+  dplyr::select(Name = GNIS_NA,
+                TotalInspections,
+                HighRiskInspections = highrisk_Counter,
+                HighRiskMotorized = HR_mot) |> 
+  leafpop::popupTable()
+
+color_pal = leaflet::colorBin(palette = 'Spectral',
+                              domain = insp_top$TotalInspections,
+                              reverse = T)
+
+color_pal_l = leaflet::colorBin(palette = 'Spectral',
+                              domain = insp_top$TotalInspections,
+                              reverse = T)
+
+leaflet() |> 
+  addTiles() |> 
+  addPolygons(
+    data = insp_top,
+    label = ~paste0(GNIS_NA,": ",TotalInspections," total inspections"),
+    popup = lapply(popup_tbls, htmltools::HTML),
+    fillColor = ~color_pal(TotalInspections),
+    fillOpacity = 0.8,
+    opacity = 0.8,
+    color = ~color_pal(TotalInspections)
+  ) |> 
+  addLegend(
+    pal = color_pal_l,
+    values = insp_top$TotalInspections
+  ) |> 
+  leaflet.extras::addResetMapButton()
+```
+
+### Interactive Table
+```{r interactive_DT}
+insp_top |> 
+  sf::st_drop_geometry() |> 
+  dplyr::select(Name = GNIS_NA,
+                TotalInspections,
+                HighRiskInspections = highrisk_Counter,
+                HighRiskMotorized = HR_mot,
+                NumberMusselFouled,
+                Non_Motorized_Counter) |> 
+  DT::datatable()
+```
+

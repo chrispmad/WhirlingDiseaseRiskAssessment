@@ -1,0 +1,380 @@
+---
+title: "Waterbody Connectivity across Watersheds"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This document assesses the connectivity and flow direction of streams and rivers that flow from the watershed 08N to the target watersheds 08P, 08M, 08L and 08K.
+
+## Results
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = F, warning = F, fig.width = 10, fig.height = 6)
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(DT)
+library(terra)
+library(bcdata)
+```
+
+### Study Area
+
+```{r load_data}
+# BC boundary polygon
+bc = bcmaps::bc_bound() |> dplyr::summarise()
+
+# Watershed drainages
+wscd = bcmaps::wsc_drainages()
+
+# Merge by SUB_DRAINAGE_AREA_CD
+wscd_s = wscd |> 
+  sf::st_zm() |> 
+  dplyr::group_by(SUB_DRAINAGE_AREA_CD) |> 
+  dplyr::summarise()
+
+# Target watershed codes.
+wscd_t = wscd_s |> 
+  dplyr::filter(SUB_DRAINAGE_AREA_CD %in% c("08N","08P","08M","08L","08K"))
+
+# Trim to BC
+wscd_t = sf::st_intersection(wscd_t, bc)
+
+em_lake = bcdc_query_geodata('freshwater-atlas-lakes') |> 
+  filter(GNIS_NAME_1 == 'Emerald Lake') |> 
+  filter(WATERSHED_GROUP_ID == 79) |> 
+  collect() |> 
+  sf::st_zm() |> 
+  sf::st_centroid()
+  
+base_wd_map = ggplot() + 
+  geom_sf(data = wscd_t, aes(fill = SUB_DRAINAGE_AREA_CD)) + 
+  geom_sf_text(data = wscd_t, aes(label = SUB_DRAINAGE_AREA_CD)) +
+  geom_sf(data = em_lake, color = 'red') +
+  ggrepel::geom_label_repel(
+    data = em_lake,
+    label = 'WD Detection in \nYoho National Park',
+    aes(geometry = geometry),
+    stat = "sf_coordinates",
+    min.segment.length = 0,
+    nudge_y = 100000,
+    nudge_x = 50000
+  ) +
+  labs(fill = 'Watershed Code', title = 'Major Watersheds in SE British Columbia') +
+  ggthemes::theme_map()
+
+base_wd_map
+
+# insp = read_sf('W:/CMadsen/Projects/ZQMussels/data/Waterbodies_with_Inspection_Data_Summaries_all_years.gpkg')
+```
+
+### Border of 08N that touches target watersheds
+
+```{r border_of_08N_and_target_watersheds}
+border_08N = wscd_t |> 
+  dplyr::filter(SUB_DRAINAGE_AREA_CD == '08N') |> 
+  st_cast("LINESTRING") |> 
+  sf::st_intersection(wscd_t[wscd_t$SUB_DRAINAGE_AREA_CD != '08N',]) |> 
+  dplyr::summarise()
+
+# Simplify geometry
+border_08N_s = rmapshaper::ms_simplify(border_08N)
+
+border_08N_b = border_08N |> 
+  sf::st_buffer(dist = 100) |> 
+  rmapshaper::ms_simplify()
+
+base_wd_map +
+  geom_sf(data = border_08N_b, col = 'orange', fill = 'gold') +
+  ggrepel::geom_label_repel(
+    data = border_08N_b,
+    label = 'Border buffered by 100 meters',
+    aes(geometry = geometry),
+    stat = "sf_coordinates",
+    min.segment.length = 0,
+    nudge_y = -200000,
+    nudge_x = 50000
+  )
+
+```
+
+```{r find_streams_near_border_of_08N}
+# Use the un-summarized version of the watersheds. Find the ones that 
+# touch our border. Query BCDC one-by-one.
+wscd_touch = wscd |> 
+  sf::st_filter(border_08N_b)
+
+wscd_all = dplyr::summarise(wscd_t)
+
+# Cycle through the smaller watershed drainage areas that touch the border with
+# 08N; get all streams that touch that portion of the border; simplify the 
+# resulting tables.
+if(!file.exists('data/pascale/streams_along_08N_border.gpkg') & !file.exists('../data/pascale/streams_along_08N_border.gpkg')){
+  streams_along_08N_border = wscd_touch$SUB_SUB_DRAINAGE_AREA_CD |> 
+    purrr::map( ~ {
+      
+      print(.x)
+      
+      this_wscd = wscd_touch[wscd_touch$SUB_SUB_DRAINAGE_AREA_CD == .x,]
+      border_touching_this_wscd = sf::st_intersection(border_08N_b, this_wscd)
+      
+      # The first query here is quite fragmentary: it only shows the piece of 
+      # each stream that touches the boundary; I'd like to get the entire stream geometry.
+      streams_touching_border = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+        filter(INTERSECTS(border_touching_this_wscd)) |> 
+        collect() |> 
+        sf::st_zm()
+      
+      if(nrow(streams_touching_border) > 0){
+        # Simplify the results table.
+        streams_touching_border = streams_touching_border |> 
+          dplyr::select(GNIS_NAME, FWA_WATERSHED_CODE, WATERSHED_GROUP_ID, BLUE_LINE_KEY) |> 
+          dplyr::mutate(across(-geometry, as.character)) |> 
+          dplyr::mutate(wscd_name = .x)
+      } else {
+        streams_touching_border = NULL
+      }
+      return(streams_touching_border)
+    })
+  
+  str_on_b = streams_along_08N_border |> 
+    dplyr::bind_rows()
+  
+  if(stringr::str_detect(getwd(), 'scripts')){
+    sf::write_sf(str_on_b, paste0('../data/pascale/streams_along_08N_border.gpkg'))
+  } else {
+    sf::write_sf(str_on_b, paste0('data/pascale/streams_along_08N_border.gpkg'))
+  }
+} else {
+  if(file.exists('data/pascale/streams_along_08N_border.gpkg')) str_on_b = sf::read_sf('data/pascale/streams_along_08N_border.gpkg')
+  if(file.exists('../data/pascale/streams_along_08N_border.gpkg')) str_on_b = sf::read_sf('../data/pascale/streams_along_08N_border.gpkg')
+}
+
+base_wd_map + 
+  geom_sf(data = str_on_b, col = 'red')
+```
+
+```{r find_watershed_id_of_downstream_neighbour_of_border_streams}
+
+# Determine which of our streams are flowing FROM 08N to any of the other watersheds.
+
+if(!file.exists('data/pascale/border_streams_downstream_neighbour.csv') & !file.exists('../data/pascale/border_streams_downstream_neighbour.csv')){
+  str_on_b_ds = str_on_b |> 
+    sf::st_drop_geometry() |> 
+    dplyr::select(FWA_WATERSHED_CODE) |> 
+    dplyr::filter(!duplicated(FWA_WATERSHED_CODE)) |> 
+    dplyr::rename(upstream_fwa_code = FWA_WATERSHED_CODE)
+  
+  # Join on a new field: the FWA code of the downstream stream.
+  str_on_b_ds = str_on_b_ds |> 
+    dplyr::left_join(
+      fwa.connect::fwa_up_and_downstream_tbl
+    )
+  
+  # Find which watershed each downstream stream is in.
+  # If it's in 08N, we can drop that stream. If it's in 
+  # one of our target watersheds, we need to keep it.
+  str_on_b_ds$ws_of_ds_stream = NA
+  
+  for(i in 1:nrow(str_on_b_ds)){
+    
+    ds_stream = NULL
+    
+    print(paste0(i," of ",nrow(str_on_b_ds)))
+    the_fwa_code = str_on_b_ds[i,]$downstream_fwa_code
+    
+    if(is.na(the_fwa_code)) next
+    
+    the_pattern = bcdata:::CQL(paste0("FWA_WATERSHED_CODE like '",the_fwa_code,"'"))
+    
+    # Get geometry of downstream stream
+    ds_stream = bcdata::bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+      bcdata::filter(the_pattern) |>
+      bcdata::collect() |> 
+      sf::st_zm() |> 
+      dplyr::group_by(BLUE_LINE_KEY,FWA_WATERSHED_CODE) |>
+      dplyr::summarise() |> 
+      dplyr::ungroup()
+    
+    # If our query returned multiple streams with different BLKs, some tend 
+    # to be little loops that we don't need to worry about.
+    # Find the longest stream and choose that one.
+    ds_stream = ds_stream |> 
+      dplyr::mutate(the_length = as.numeric(sf::st_length(geometry))) |> 
+      dplyr::arrange(dplyr::desc(the_length)) |> 
+      dplyr::slice(1)
+    
+    # Which watershed is/are the stream(s) in?
+    ds_stream = ds_stream |> 
+      sf::st_join(wscd_t)
+    
+    # Drop instances of streams looping back into 08N
+    if(nrow(ds_stream) > 1){
+      ds_stream = ds_stream |> 
+        dplyr::filter(SUB_DRAINAGE_AREA_CD != '08N')
+      
+    }
+    
+    if(nrow(ds_stream) > 1){
+      ds_stream = ds_stream |> 
+        dplyr::group_by(BLUE_LINE_KEY, FWA_WATERSHED_CODE) |> 
+        dplyr::summarise(SUB_DRAINAGE_AREA_CD = paste0(SUB_DRAINAGE_AREA_CD, collapse = ', ')) |> 
+        dplyr::ungroup()
+    }
+    
+    str_on_b_ds[i,]$ws_of_ds_stream = ds_stream$SUB_DRAINAGE_AREA_CD[1]
+  }
+  
+  # Drop NA and 08N entries for downstream ws id
+  str_on_b_ds_ws = str_on_b_ds |> 
+    dplyr::filter(!is.na(ws_of_ds_stream)) |> 
+    dplyr::filter(ws_of_ds_stream != '08N') |> 
+    dplyr::rename(FWA_WATERSHED_CODE = upstream_fwa_code)
+  
+  if(stringr::str_detect(getwd(), 'scripts')){
+    write.csv(str_on_b_ds_ws, paste0('../data/pascale/border_streams_downstream_neighbour.csv'), row.names = F)
+  } else {
+    write.csv(str_on_b_ds_ws, paste0('data/pascale/border_streams_downstream_neighbour.csv'), row.names = F)
+  }
+} else {
+  if(file.exists('data/pascale/border_streams_downstream_neighbour.csv')) str_on_b_ds_ws = readr::read_csv('data/pascale/border_streams_downstream_neighbour.csv')
+  if(file.exists('../data/pascale/border_streams_downstream_neighbour.csv')) str_on_b_ds_ws = readr::read_csv('../data/pascale/border_streams_downstream_neighbour.csv')
+}
+```
+
+```{r find_fwa_codes_of_all_streams_in_graphs_that_include_border_streams}
+str_on_b_outside_08N = str_on_b |> 
+  dplyr::inner_join(str_on_b_ds_ws)
+
+base_wd_map + 
+  geom_sf(data = str_on_b_outside_08N, col = 'red')
+
+library(tidygraph)
+
+all_streams_w_group_ids = tidygraph::as_tbl_graph(fwa.connect::fwa_up_and_downstream_tbl) |> 
+  activate(nodes) |> 
+  mutate(group_id = group_components())
+
+all_streams_w_group_ids <- as_tibble(all_streams_w_group_ids, what = "nodes") |> 
+  dplyr::rename(FWA_WATERSHED_CODE = name)
+
+str_on_b_w_group = str_on_b_outside_08N |> 
+  dplyr::left_join(all_streams_w_group_ids)
+
+rm(all_streams_w_group_ids)
+
+# Find the FWA_WATERSHED_CODEs of ALL streams that are present in the 
+# graph components of streams whose downstream neighbour is in one of 
+# our target watersheds.
+codes_for_download = str_on_b_w_group |> 
+  dplyr::filter(group_id %in% unique(str_on_b_w_group$group_id)) |> 
+  dplyr::filter(!duplicated(FWA_WATERSHED_CODE)) |> 
+  dplyr::pull(FWA_WATERSHED_CODE)
+```
+
+```{r split_watersheds_into_subwatersheds_and_then_download_all_streams}
+
+# Split the watersheds into their subwatersheds, find intersection of those. Use those to download streams.
+subws = wscd |> 
+  dplyr::filter(SUB_DRAINAGE_AREA_CD %in% wscd_t$SUB_DRAINAGE_AREA_CD) |> 
+  sf::st_intersection(bc)
+
+# base_wd_map + 
+#   geom_sf(data = subws, fill = 'transparent', col = 'grey')
+
+# Try to download all streams in these watersheds. Maybe go by subwatershed so that it's not too large.
+for(area_cd in unique(subws$SUB_SUB_DRAINAGE_AREA_CD)){
+  
+  if(!file.exists(paste0('../data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg')) & !file.exists(paste0('data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg'))){
+    
+    print(area_cd)
+    
+    the_subws = subws[subws$SUB_SUB_DRAINAGE_AREA_CD == area_cd,]
+    
+    ggplot() + geom_sf(data = the_subws)
+    
+    streams = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+      bcdata::filter(INTERSECTS(the_subws)) |> 
+      collect() |> 
+      sf::st_zm() |> 
+      dplyr::mutate(watershed_id = area_cd)
+    
+    # ggplot() + 
+    #   geom_sf(data = the_subws, fill = 'purple', col = 'black') + geom_sf(data = streams, col='red')
+    
+    if(stringr::str_detect(getwd(), 'scripts')){
+      sf::write_sf(streams, paste0('../data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg'))
+    } else {
+      sf::write_sf(streams, paste0('data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg'))
+    }
+  }
+}
+```
+
+```{r read_in_and_join_all_streams_dropping_duplicate_geometries}
+
+if(!file.exists('data/pascale/all_streams_in_watersheds_of_interest.gpkg') & !file.exists('../data/pascale/all_streams_in_watersheds_of_interest.gpkg')){
+
+if(stringr::str_detect(getwd(), 'scripts')){
+    stream_gpkgs = list.files('../data/pascale/streams_in_target_watersheds/',
+               pattern = '.gpkg$',
+               full.names = T) |> 
+      lapply(sf::read_sf)
+  } else {
+    stream_gpkgs = list.files('data/pascale/streams_in_target_watersheds/',
+               pattern = '.gpkg$',
+               full.names = T) |> 
+      lapply(sf::read_sf)
+  }
+
+# All streams in watersheds! Pick fewer columns and bind all rows.
+all_str_in_ws = purrr::map(stream_gpkgs, ~ {
+  .x |> 
+    dplyr::select(GNIS_NAME, BLUE_LINE_KEY, FWA_WATERSHED_CODE, GRADIENT)
+}) |> 
+  dplyr::bind_rows()
+
+# Add on graph component ids; drop components that aren't in the handful we identified as 
+# border-crossing groups!
+all_str_in_ws = all_str_in_ws |> 
+  dplyr::left_join(all_streams_w_group_ids) |> 
+  dplyr::filter(group_id %in% unique(str_on_b_w_group$group_id))
+
+if(stringr::str_detect(getwd(), 'scripts')){
+  sf::write_sf(all_str_in_ws,'../data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+} else {
+  sf::write_sf(all_str_in_ws,'data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+}
+} else {
+  if(stringr::str_detect(getwd(), 'scripts')){
+    all_str_in_ws = sf::read_sf('../data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+  } else {
+    all_str_in_ws = sf::read_sf('data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+  }
+}
+
+# all_str_in_ws |> 
+#   sf::st_drop_geometry() |> 
+#   dplyr::count(group_id, sort = T)
+```
+
+```{r clean_data}
+# # Get top 50 destination waterbodies
+# insp_top = insp |>
+#   dplyr::filter(!GNIS_NA %in% c("Dry Storage","Pacific Ocean")) |>
+#   dplyr::arrange(dplyr::desc(TotalInspections)) |>
+#   dplyr::slice(1:50)
+# 
+# insp_top = st_transform(insp_top, 4326)
+# bc = st_transform(bcmaps::bc_bound(), 4326)
+# 
+# insp_top = insp_top |> 
+#   dplyr::mutate(colours = as.numeric(cut(TotalInspections,5)),
+#                 bin_levels = as.character(cut(dig.lab = 8,TotalInspections,5))) |> 
+#   dplyr::mutate(bin_levels = stringr::str_remove_all(bin_levels, '(\\(|\\])')) |> 
+#   dplyr::mutate(bin_levels = stringr::str_replace(bin_levels, ',', '-')) |> 
+#   dplyr::mutate(bin_levels = stringr::str_replace(bin_levels, '\\.[0-9]+', '')) |> 
+#   dplyr::mutate(bin_levels = as.factor(bin_levels)) |> 
+#   dplyr::mutate(bin_levels = forcats::fct_inorder(bin_levels))
+```
