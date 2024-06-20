@@ -7,7 +7,7 @@ output: html_document
 
 This document assesses the connectivity and flow direction of streams and rivers that flow from the watershed 08N to the target watersheds 08P, 08M, 08L and 08K.
 
-## Results
+## Results {.tabset}
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = F, warning = F, fig.width = 10, fig.height = 6)
@@ -45,13 +45,15 @@ em_lake = bcdc_query_geodata('freshwater-atlas-lakes') |>
   filter(GNIS_NAME_1 == 'Emerald Lake') |> 
   filter(WATERSHED_GROUP_ID == 79) |> 
   collect() |> 
-  sf::st_zm() |> 
+  sf::st_zm()
+
+em_lake_c = em_lake |> 
   sf::st_centroid()
   
 base_wd_map = ggplot() + 
   geom_sf(data = wscd_t, aes(fill = SUB_DRAINAGE_AREA_CD)) + 
   geom_sf_text(data = wscd_t, aes(label = SUB_DRAINAGE_AREA_CD)) +
-  geom_sf(data = em_lake, color = 'red') +
+  geom_sf(data = em_lake_c, color = 'red') +
   ggrepel::geom_label_repel(
     data = em_lake,
     label = 'WD Detection in \nYoho National Park',
@@ -62,16 +64,18 @@ base_wd_map = ggplot() +
     nudge_x = 50000
   ) +
   labs(fill = 'Watershed Code', title = 'Major Watersheds in SE British Columbia') +
-  ggthemes::theme_map()
+  ggthemes::theme_map() + 
+  ggspatial::annotation_scale(location = 'br')
 
 base_wd_map
 
 # insp = read_sf('W:/CMadsen/Projects/ZQMussels/data/Waterbodies_with_Inspection_Data_Summaries_all_years.gpkg')
 ```
 
-### Border of 08N that touches target watersheds
-
 ```{r border_of_08N_and_target_watersheds}
+
+### Border of 08N that Touches Target Watersheds
+
 border_08N = wscd_t |> 
   dplyr::filter(SUB_DRAINAGE_AREA_CD == '08N') |> 
   st_cast("LINESTRING") |> 
@@ -84,20 +88,11 @@ border_08N_s = rmapshaper::ms_simplify(border_08N)
 border_08N_b = border_08N |> 
   sf::st_buffer(dist = 100) |> 
   rmapshaper::ms_simplify()
-
-base_wd_map +
-  geom_sf(data = border_08N_b, col = 'orange', fill = 'gold') +
-  ggrepel::geom_label_repel(
-    data = border_08N_b,
-    label = 'Border buffered by 100 meters',
-    aes(geometry = geometry),
-    stat = "sf_coordinates",
-    min.segment.length = 0,
-    nudge_y = -200000,
-    nudge_x = 50000
-  )
-
 ```
+
+### Streams Along Border of 08N that Touches Target Watersheds
+
+Note: these streams are quite hard to see - look for tiny red lines along the border of 08N with the other watersheds.
 
 ```{r find_streams_near_border_of_08N}
 # Use the un-summarized version of the watersheds. Find the ones that 
@@ -247,9 +242,6 @@ if(!file.exists('data/pascale/border_streams_downstream_neighbour.csv') & !file.
 str_on_b_outside_08N = str_on_b |> 
   dplyr::inner_join(str_on_b_ds_ws)
 
-base_wd_map + 
-  geom_sf(data = str_on_b_outside_08N, col = 'red')
-
 library(tidygraph)
 
 all_streams_w_group_ids = tidygraph::as_tbl_graph(fwa.connect::fwa_up_and_downstream_tbl) |> 
@@ -354,9 +346,84 @@ if(stringr::str_detect(getwd(), 'scripts')){
   }
 }
 
-# all_str_in_ws |> 
-#   sf::st_drop_geometry() |> 
-#   dplyr::count(group_id, sort = T)
+```
+
+```{r brainstorming}
+# Things to do maybe
+# 1. Find intersection points where one stream feeds into another stream. Make into points. Get elevation, 
+# find directionality of streams such that higher streams flow into lower streams.
+
+# 2. Only include named streams and see what the extent looks like?
+```
+
+### Plot of Named Streams in Target Watersheds Coloured by Group ID
+
+```{r named_streams_plot}
+if(!file.exists('data/pascale/named_streams_in_watersheds_of_interest.gpkg') & !file.exists('../data/pascale/named_streams_in_watersheds_of_interest.gpkg')){
+  
+  named_str = all_str_in_ws |> 
+    dplyr::filter(!is.na(GNIS_NAME)) |> 
+    dplyr::mutate(group_id = as.character(group_id)) |> 
+    dplyr::group_by(GNIS_NAME, BLUE_LINE_KEY, FWA_WATERSHED_CODE, group_id) |> 
+    dplyr::summarise()
+  
+  if(stringr::str_detect(getwd(), 'scripts')){
+    sf::write_sf(named_str,'../data/pascale/named_streams_in_watersheds_of_interest.gpkg')
+  } else {
+    sf::write_sf(named_str,'data/pascale/named_streams_in_watersheds_of_interest.gpkg')
+  }
+} else {
+  if(stringr::str_detect(getwd(), 'scripts')){
+    named_str = sf::read_sf('../data/pascale/named_streams_in_watersheds_of_interest.gpkg')
+  } else {
+    named_str = sf::read_sf('data/pascale/named_streams_in_watersheds_of_interest.gpkg')
+  }
+}
+
+# ggplot() + 
+  # geom_sf(data = bc) +
+  # geom_sf(data = wscd_t, aes(fill = SUB_DRAINAGE_AREA_CD), alpha = 0.35, col = 'darkgrey') +
+base_wd_map +
+  geom_sf(data = named_str, aes(color = group_id)) +
+  geom_sf(data = named_str[named_str$GNIS_NAME %in% c("Fraser River","Columbia River"),],
+          aes(color = group_id), linewidth = 1.2) +
+  ggrepel::geom_label_repel(
+    data = named_str[named_str$GNIS_NAME %in% c("Fraser River","Columbia River"),],
+    aes(label = GNIS_NAME, geometry = geom),
+    stat = "sf_coordinates",
+    min.segment.length = 0,
+    nudge_x = 200000, 
+    nudge_y = 250000) +
+  scale_fill_brewer(palette = 'Set1') + 
+  ggthemes::theme_map() + 
+  labs(fill = 'Watershed Code',
+       color = 'Group ID',
+       title = 'Connectivity of Streams in Watersheds of Interest',
+       subtitle = '(only named streams displayed here for increased readability)') + 
+  coord_sf(xlim = st_bbox(wscd_t)[c(1,3)],
+           ylim = st_bbox(wscd_t)[c(2,4)])
+
+```
+
+### Tracing Course Downstream from Emerald Lake
+
+```{r try_using_fwa_connect_trace_downstream_from_emerald_lake}
+
+str_in_em_lake = all_str_in_ws |> 
+  sf::st_filter(em_lake)
+
+fwa_codes_in_em_lake = unique(str_in_em_lake$FWA_WATERSHED_CODE)
+
+ds_from_em_lake = suppressMessages(fwa.connect::trace_course_downstream(fwa_code = fwa_codes_in_em_lake[2]))
+
+base_wd_map +
+  geom_sf(data = em_lake) + 
+  geom_sf(data = ds_from_em_lake, aes(col = FWA_WATERSHED_CODE)) + 
+  ggrepel::geom_label_repel(data = em_lake, aes(label = GNIS_NAME_1, geometry = geometry),
+                            stat = 'sf_coordinates') +
+  ggthemes::theme_map() + 
+  theme(legend.position = 'none') + 
+  labs(title = 'Tracing Course Downstream from Emerald Lake, Yoho National Park')
 ```
 
 ```{r clean_data}
