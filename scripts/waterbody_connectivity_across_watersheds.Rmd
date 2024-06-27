@@ -1,0 +1,658 @@
+---
+title: "Waterbody Connectivity across Watersheds"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This document assesses the connectivity and flow direction of streams and rivers that flow from the watershed 08N to the target watersheds 08P, 08M, 08L and 08K.
+
+## Results
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = F, warning = F, fig.width = 10, fig.height = 6)
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(DT)
+library(terra)
+library(bcdata)
+library(patchwork)
+library(ggraph)
+```
+
+### Study Area
+
+```{r load_data}
+# BC boundary polygon
+bc = bcmaps::bc_bound() |> dplyr::summarise()
+
+# Watershed drainages
+wscd = bcmaps::wsc_drainages()
+
+# Merge by SUB_DRAINAGE_AREA_CD
+wscd_s = wscd |> 
+  sf::st_zm() |> 
+  dplyr::group_by(SUB_DRAINAGE_AREA_CD) |> 
+  dplyr::summarise()
+
+# Target watershed codes.
+wscd_t = wscd_s |> 
+  dplyr::filter(SUB_DRAINAGE_AREA_CD %in% c("08N","08P","08M","08L","08K"))
+
+# Trim to BC
+wscd_t = sf::st_intersection(wscd_t, bc)
+
+wscd_t = wscd_t |> 
+  dplyr::left_join(dplyr::distinct(dplyr::select(sf::st_drop_geometry(wscd),SUB_DRAINAGE_AREA_CD, SUB_DRAINAGE_AREA_NAME)))
+
+em_lake = bcdc_query_geodata('freshwater-atlas-lakes') |> 
+  filter(GNIS_NAME_1 == 'Emerald Lake') |> 
+  filter(WATERSHED_GROUP_ID == 79) |> 
+  collect() |> 
+  sf::st_zm()
+
+em_lake_c = em_lake |> 
+  sf::st_centroid()
+  
+base_wd_map = ggplot() + 
+  geom_sf(data = wscd_t, aes(fill = SUB_DRAINAGE_AREA_NAME)) + 
+  geom_sf_text(data = wscd_t, aes(label = SUB_DRAINAGE_AREA_CD)) +
+  geom_sf(data = em_lake_c, color = 'red') +
+  ggrepel::geom_label_repel(
+    data = em_lake,
+    label = 'WD Detection in \nYoho National Park',
+    aes(geometry = geometry),
+    stat = "sf_coordinates",
+    min.segment.length = 0,
+    nudge_y = 100000,
+    nudge_x = 50000
+  ) +
+  labs(fill = 'Watershed Name', title = 'Major Watersheds in SE British Columbia') +
+  ggthemes::theme_map() + 
+  ggspatial::annotation_scale(location = 'br')
+
+inset = ggplot() + 
+  geom_sf(data = bc) + 
+  # geom_sf(data = sf::st_as_sfc(sf::st_bbox(wscd_t)),
+  #         color = 'red', fill = 'transparent') +
+  geom_sf(data = wscd_t |> dplyr::summarise(),
+          color = 'red', fill = 'transparent') +
+  ggthemes::theme_map() + 
+  theme(panel.background = element_rect(color = 'black'))
+
+base_wd_map + 
+  inset_element(inset, left = 0.75, bottom = 0.75, right = 1, top = 1, align_to = 'full')
+```
+
+```{r border_of_08N_and_target_watersheds}
+
+### Border of 08N that Touches Target Watersheds
+if(interactive()) ggplot() + geom_sf(data = wscd_t)
+
+border_08N_all = wscd_t |> 
+  dplyr::filter(SUB_DRAINAGE_AREA_CD == '08N') |> 
+  st_cast("LINESTRING")
+
+if(interactive()) ggplot() + geom_sf(data = wscd_t) + geom_sf(data = border_08N_all, col = 'red')
+
+border_08N = border_08N_all |> 
+  sf::st_intersection(wscd_t[wscd_t$SUB_DRAINAGE_AREA_CD != '08N',]) |> 
+  dplyr::summarise()
+
+if(interactive()) ggplot() + geom_sf(data = wscd_t) + geom_sf(data = border_08N, col = 'red')
+
+# Simplify geometry
+# border_08N_s = rmapshaper::ms_simplify(border_08N)
+
+border_08N_b = border_08N |> 
+  sf::st_buffer(dist = 100)
+
+```
+
+<!-- ### Streams Along Border of 08N that Touch Target Watersheds -->
+
+<!-- Note: these streams are quite hard to see - look for tiny red lines along the border of 08N with the other watersheds. --><!-- Note: these streams are quite hard to see - look for tiny red lines along the border of 08N with the other watersheds. -->
+
+```{r find_streams_near_border_of_08N}
+# Use the un-summarized version of the watersheds. Find the ones that 
+# touch our border. Query BCDC one-by-one.
+wscd_touch = wscd |> 
+  sf::st_filter(border_08N_b) |> 
+  sf::st_intersection(bc)
+
+if(interactive()) ggplot() + geom_sf(data = wscd_t) + geom_sf(data = wscd_touch, fill = 'purple') + geom_sf(data = border_08N_all, col = 'red')
+
+# Combine the 5 watersheds of interest
+wscd_all = dplyr::summarise(wscd_t)
+
+# Cycle through the smaller watershed drainage areas that touch the border with
+# 08N; get all streams that touch that portion of the border; simplify the 
+# resulting tables.
+if(!file.exists('data/pascale/streams_along_08N_border.gpkg') & !file.exists('../data/pascale/streams_along_08N_border.gpkg')){
+  streams_along_08N_border = wscd_touch$SUB_SUB_DRAINAGE_AREA_CD |> 
+    purrr::map( ~ {
+      
+      print(.x)
+      
+      this_wscd = wscd_touch[wscd_touch$SUB_SUB_DRAINAGE_AREA_CD == .x,]
+      border_touching_this_wscd = sf::st_intersection(border_08N_b, this_wscd)
+      
+      # The first query here is quite fragmentary: it only shows the piece of 
+      # each stream that touches the boundary; I'd like to get the entire stream geometry.
+      streams_touching_border = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+        filter(STREAM_ORDER >= 3) |> 
+        filter(INTERSECTS(border_touching_this_wscd)) |> 
+        collect() |> 
+        sf::st_zm()
+      
+      if(nrow(streams_touching_border) > 0){
+        # If the sub-watershed is still too large to spatially filter streams,
+        # filter the results here.
+        print(paste0('pre-spatial filter # of streams:', nrow(streams_touching_border)))
+        streams_touching_border = streams_touching_border |> 
+          sf::st_filter(border_touching_this_wscd)
+        print(paste0('post-spatial filter # of streams:', nrow(streams_touching_border)))
+        
+        # Simplify the results table.
+        streams_touching_border = streams_touching_border |> 
+          dplyr::select(GNIS_NAME, FWA_WATERSHED_CODE, WATERSHED_GROUP_ID, BLUE_LINE_KEY) |> 
+          dplyr::mutate(across(-geometry, as.character)) |> 
+          dplyr::mutate(wscd_name = .x)
+      } else {
+        streams_touching_border = NULL
+      }
+      return(streams_touching_border)
+    })
+  
+  str_on_b = streams_along_08N_border |> 
+    dplyr::bind_rows()
+  
+  if(stringr::str_detect(getwd(), 'scripts')){
+    sf::write_sf(str_on_b, paste0('../data/pascale/streams_along_08N_border.gpkg'))
+  } else {
+    sf::write_sf(str_on_b, paste0('data/pascale/streams_along_08N_border.gpkg'))
+  }
+} else {
+  if(file.exists('data/pascale/streams_along_08N_border.gpkg')) str_on_b = sf::read_sf('data/pascale/streams_along_08N_border.gpkg')
+  if(file.exists('../data/pascale/streams_along_08N_border.gpkg')) str_on_b = sf::read_sf('../data/pascale/streams_along_08N_border.gpkg')
+}
+
+# base_wd_map + 
+#   geom_sf(data = str_on_b, col = 'red')
+```
+
+### Connectivity Analysis: 
+#### Which Streams and Rivers Are Physically Connected?
+
+The data source for streams and rivers in British Columbia is the open-access 'Freshwater Atlas', in particular the [Freshwater Atlas Stream Network](https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-stream-network) layer. A key field in this layer that describes flow direction and connectivity is the 'FWA_WATERSHED_CODE', which looks like this: 
+```{r}
+str_on_b[1,]$FWA_WATERSHED_CODE
+```
+
+Each chunk of digits describes a particular waterbody (e.g. a stream or a river). In this example, '300' refers to the Columbia River. The following six digits (826265) describe some stream (e.g. 'Stream A'); this number tells us that Stream A flows into the Columbia River 82.6% along the course of the Columbia River. One level upstream of Stream A, we have Stream B, which flows into Stream A 38.2% along the course of Stream A. After Stream B, there are no more non-0 chunks of six digits, so we can be sure that Stream B is the identity of this stream.
+
+For another work project, in an attempt to facilitate working with the massive dataset that is the Freshwater Atlas Stream Network, I have summarised the entire network to a 2-column table; column one describes the FWA_WATERSHED_CODE of the 'upstream' streams and column two describes of the 'downstream' streams. With this table, it is possible to abstract the stream network to a web of connected (and disconnected) nodes and links, in other words, a network or a graph. Finding connections in such a graph is lightning-fast in R, unlike attempting to spatially identify networks.
+
+Here is a visual representation of the above process. Let's take a look at the stream whose FWA_WATERSHED_CODE is above.
+
+### Network Connectivity Demo {.tabset}
+
+#### Target Stream
+
+```{r connectivity_demo_part_1}
+eg_fwa = str_on_b[1,]$FWA_WATERSHED_CODE
+
+eg_str = bcdata::bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+  bcdata::filter(FWA_WATERSHED_CODE == eg_fwa) |>
+  bcdata::collect() |> 
+  sf::st_zm() |>
+  dplyr::group_by(FWA_WATERSHED_CODE, BLUE_LINE_KEY) |>
+  dplyr::summarise() |> 
+  dplyr::ungroup()
+
+ggplot() + 
+  geom_sf(data = eg_str) + 
+  ggthemes::theme_map() + 
+  ggspatial::annotation_scale(location = 'br') + 
+  labs(title = paste0("FWA_WATERSHED_CODE: ",
+                      stringr::str_replace(eg_str$FWA_WATERSHED_CODE,"000000.*","..., i.e. 'Stream B'"))
+  )
+```
+
+#### Target Stream with Nearby Streams
+
+```{r connectivity_demo_part_2}
+# Buffer our example
+eg_str_b = sf::st_buffer(eg_str, dist = 5000)
+
+# Grab elevation too
+eg_elev = terra::rast(elevatr::get_elev_raster(eg_str_b, z = 10))
+
+# Trim elevation to example area
+eg_elev = terra::crop(eg_elev, terra::project(terra::vect(eg_str_b), terra::crs(eg_elev)))
+
+BLK = eg_str$BLUE_LINE_KEY
+
+the_pattern = bcdata:::CQL(paste0("BLUE_LINE_KEY not like '",BLK,"'"))
+
+# Get nearby streams.
+eg_str_neighs = bcdata::bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+  bcdata::filter(bcdata::INTERSECTS(eg_str_b)) |>
+  # bcdata::filter(the_pattern) |> 
+  bcdata::collect() |> 
+  dplyr::filter(FWA_WATERSHED_CODE != eg_str$FWA_WATERSHED_CODE)
+
+# eg_str_bro = eg_str_neighs[eg_str_neighs$FWA_WATERSHED_CODE == "300-826265-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000-000000",]
+
+ggplot() + 
+  geom_sf(data = eg_str, col = 'darkblue', linewidth = 1) + 
+  # geom_sf(data = eg_str_bro, col = 'blue', linewidth = 0.8) +
+  geom_sf(data = eg_str_neighs, col = 'lightblue') + 
+  ggrepel::geom_text_repel(data = eg_str, 
+                           aes(label = 'Stream B', geometry = geometry),
+                           stat = 'sf_coordinates',
+                           nudge_y = -200, nudge_x = -1400) + 
+  ggthemes::theme_map() + 
+  ggspatial::annotation_scale(location = 'br')
+```
+
+```{r get_connectivity}
+
+# Get connectivity.
+stream_conn = fwa.connect::stream_conn_tbl()
+
+groups_for_streams = stream_conn |> 
+  tidygraph::as_tbl_graph() |> 
+  tidygraph::activate('nodes') |> 
+  tidygraph::mutate(group_id = tidygraph::group_components()) |> 
+  tidyr::as_tibble() |> 
+  dplyr::rename(FWA_WATERSHED_CODE = name) |> 
+  dplyr::filter(FWA_WATERSHED_CODE %in% c(eg_str$FWA_WATERSHED_CODE, eg_str_neighs$FWA_WATERSHED_CODE))
+  
+eg_str_neighs_g = eg_str_neighs |> 
+  dplyr::left_join(groups_for_streams)
+
+eg_str_g = eg_str |> 
+  dplyr::left_join(groups_for_streams)
+```
+
+#### Connectivity Delineated and Abstraction Exemplified
+```{r visually_explain_abstraction_to_tidygraph}
+eg_tidy = stream_conn |> 
+  tidygraph::as_tbl_graph() |> 
+  tidygraph::activate('nodes') |> 
+  tidygraph::mutate(group_id = tidygraph::group_components()) |> 
+  # tidyr::as_tibble() |> 
+  dplyr::filter(name %in% c(eg_str$FWA_WATERSHED_CODE, eg_str_neighs$FWA_WATERSHED_CODE))
+
+abstract_g = ggraph(eg_tidy, layout = 'fr') + 
+  # geom_edge_link(aes(color = as.character(group_id))) +
+  geom_edge_link2(aes(color = as.character(node.group_id))) + 
+  ggraph::geom_node_point(aes(color = as.character(group_id))) + 
+  scale_colour_brewer(palette = 'Spectral') +
+  scale_edge_color_brewer(palette = 'Spectral') +
+  theme(plot.background = element_rect(fill = 'lightgrey', color = 'lightgrey'),
+        legend.background = element_rect(fill = 'lightgrey')) + 
+  labs(fill = "Elevation Contour Bin", color = 'Connected Group', edge_colour = 'Connected Group')
+  
+right_arrow_plot = ggplot() + 
+  ggplot2::geom_path(aes(x = c(0,1), y = c(1,1)), linewidth = 2, arrow = grid::arrow()) + 
+  geom_text(aes(x = 0.5, y = 1.1, label = "abstract...")) +
+  scale_y_continuous(limits = c(0,2)) +
+  ggthemes::theme_map() + 
+  theme(plot.background = element_rect(fill = 'lightgrey', color = 'lightgrey'))
+
+g = ggplot() + 
+  tidyterra::geom_spatraster_contour_filled(data = eg_elev, alpha = 0.5) +
+  geom_sf(data = eg_str_neighs_g, aes(col = as.character(group_id))) + 
+  geom_sf(data = eg_str_g, aes(col = as.character(group_id))) + 
+  scale_colour_brewer(palette = 'Spectral') +
+  labs(color = 'Connected Group', fill = "Elevation \nContour \nBin (m)",
+       title = "Streams with Elevation Map") + 
+  theme(plot.background = element_rect(fill = 'lightgrey', color = 'lightgrey'),
+        legend.background = element_rect(fill = 'lightgrey')) + 
+  ggspatial::annotation_scale()
+
+g + right_arrow_plot + abstract_g + 
+  patchwork::plot_layout(widths = c(2,1,2))
+```
+
+Note that the present analysis does not (yet) include assessments of flow direction nor of obstacles to fish passage. Inclusion of such factors would theoretically reduce the number of stream/river connections that pose a risk for introduction of aquatic freshwater invasive species. Therefore, a simple analysis of physical connectivity between water bodies (streams, rivers, lakes) is potentially the most risk-averse.
+
+### Interactive Plot with All Streams and Border-Crossing Streams Marked
+
+```{r assign_group_components_to_all_streams_in_analysis}
+# Find group ID of the streams from above.
+library(tidygraph)
+all_streams_w_group_ids = tidygraph::as_tbl_graph(fwa.connect::stream_conn_tbl()) |> 
+  activate(nodes) |> 
+  mutate(group_id = group_components())
+
+all_streams_w_group_ids <- as_tibble(all_streams_w_group_ids, what = "nodes") |> 
+  dplyr::rename(FWA_WATERSHED_CODE = name)
+
+str_on_b_g = str_on_b |> 
+  dplyr::left_join(all_streams_w_group_ids)
+```
+
+```{r interactive_map_showing_watershed_border_crossing_streams_of_order_3_and_up}
+# 
+# leaflet() |> 
+#   addTiles() |> 
+#   addPolygons(
+#     data = sf::st_transform(wscd_t, 4326),
+#     label = ~SUB_DRAINAGE_AREA_CD,
+#     fillColor = 'purple',
+#     color = 'grey'
+#   ) |> 
+#   addPolylines(
+#     data = sf::st_transform(str_on_b_g, 4326),
+#     color = ~group_pal(group_id),
+#     label = ~paste0('FWA code: ', stringr::str_remove_all(FWA_WATERSHED_CODE,"-000000.*"),
+#                     '; Group ID: ',group_id),
+#     group = 'rivers'
+#   ) |> 
+#   leaflet::addLayersControl(
+#     overlayGroups = 'rivers'
+#   ) |> 
+#   addLegend(pal = group_pal, values = unique(str_on_b_g$group_id),
+#             title = 'Group ID')
+```
+
+```{r split_watersheds_into_subwatersheds_and_then_download_all_streams}
+
+# Split the watersheds into their subwatersheds, find intersection of those. Use those to download streams.
+subws = wscd |> 
+  dplyr::filter(SUB_DRAINAGE_AREA_CD %in% wscd_t$SUB_DRAINAGE_AREA_CD) |> 
+  sf::st_intersection(bc)
+
+# base_wd_map + 
+#   geom_sf(data = subws, fill = 'transparent', col = 'grey')
+
+# Try to download all streams in these watersheds. Maybe go by subwatershed so that it's not too large.
+for(area_cd in unique(subws$SUB_SUB_DRAINAGE_AREA_CD)){
+  
+  if(!file.exists(paste0('../data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg')) & !file.exists(paste0('data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg'))){
+    
+    print(area_cd)
+    
+    the_subws = subws[subws$SUB_SUB_DRAINAGE_AREA_CD == area_cd,]
+    
+    ggplot() + geom_sf(data = the_subws)
+    
+    streams = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+      bcdata::filter(INTERSECTS(the_subws)) |> 
+      collect() |> 
+      sf::st_zm() |> 
+      dplyr::mutate(watershed_id = area_cd)
+    
+    # ggplot() + 
+    #   geom_sf(data = the_subws, fill = 'purple', col = 'black') + geom_sf(data = streams, col='red')
+    
+    if(stringr::str_detect(getwd(), 'scripts')){
+      sf::write_sf(streams, paste0('../data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg'))
+    } else {
+      sf::write_sf(streams, paste0('data/pascale/streams_in_target_watersheds/streams_',area_cd,'.gpkg'))
+    }
+  }
+}
+```
+
+```{r read_in_and_join_all_streams_dropping_duplicate_geometries}
+
+if(!file.exists('data/pascale/all_streams_in_watersheds_of_interest.gpkg') & !file.exists('../data/pascale/all_streams_in_watersheds_of_interest.gpkg')){
+
+if(stringr::str_detect(getwd(), 'scripts')){
+    stream_gpkgs = list.files('../data/pascale/streams_in_target_watersheds/',
+               pattern = '.gpkg$',
+               full.names = T) |> 
+      lapply(sf::read_sf)
+  } else {
+    stream_gpkgs = list.files('data/pascale/streams_in_target_watersheds/',
+               pattern = '.gpkg$',
+               full.names = T) |> 
+      lapply(sf::read_sf)
+  }
+
+# All streams in watersheds! Pick fewer columns and bind all rows.
+all_str_in_ws = purrr::map(stream_gpkgs, ~ {
+  .x |> 
+    dplyr::select(GNIS_NAME, BLUE_LINE_KEY, FWA_WATERSHED_CODE, STREAM_ORDER) |> 
+    dplyr::filter(STREAM_ORDER >= 3)
+}) |> 
+  dplyr::bind_rows()
+
+# Add on graph component ids; drop components that aren't in the handful we identified as 
+# border-crossing groups!
+all_str_in_ws = all_str_in_ws |> 
+  dplyr::left_join(all_streams_w_group_ids) |> 
+  dplyr::filter(group_id %in% unique(str_on_b_g$group_id))
+
+if(stringr::str_detect(getwd(), 'scripts')){
+  sf::write_sf(all_str_in_ws,'../data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+} else {
+  sf::write_sf(all_str_in_ws,'data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+}
+} else {
+  if(stringr::str_detect(getwd(), 'scripts')){
+    all_str_in_ws = sf::read_sf('../data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+  } else {
+    all_str_in_ws = sf::read_sf('data/pascale/all_streams_in_watersheds_of_interest.gpkg')
+  }
+}
+
+```
+
+```{r summarise_streams_by_fwa_code_BLK_Name_and_group_id}
+if(!file.exists('data/pascale/all_streams_in_watersheds_of_interest_summarized.gpkg') & !file.exists('../data/pascale/all_streams_in_watersheds_of_interest_summarized.gpkg')){
+  
+all_str_sum = all_str_in_ws |> 
+  dplyr::group_by(GNIS_NAME, BLUE_LINE_KEY, FWA_WATERSHED_CODE,
+                  STREAM_ORDER, group_id) |> 
+  dplyr::summarise()
+
+if(stringr::str_detect(getwd(), 'scripts')){
+  sf::write_sf(all_str_sum,'../data/pascale/all_streams_in_watersheds_of_interest_summarized.gpkg')
+} else {
+  sf::write_sf(all_str_sum,'data/pascale/all_streams_in_watersheds_of_interest_summarized.gpkg')
+}
+} else {
+  if(stringr::str_detect(getwd(), 'scripts')){
+    all_str_sum = sf::read_sf('../data/pascale/all_streams_in_watersheds_of_interest_summarized.gpkg')
+  } else {
+    all_str_sum = sf::read_sf('data/pascale/all_streams_in_watersheds_of_interest_summarized.gpkg')
+  }
+}
+
+if(!file.exists('data/pascale/all_streams_in_watersheds_of_interest_summarized_simple.gpkg') & !file.exists('../data/pascale/all_streams_in_watersheds_of_interest_summarized_simple.gpkg')){
+# Try simplifying their geometry.
+all_str_sum_s = rmapshaper::ms_simplify(all_str_sum)
+
+if(stringr::str_detect(getwd(), 'scripts')){
+  sf::write_sf(all_str_sum_s,'../data/pascale/all_streams_in_watersheds_of_interest_summarized_simple.gpkg')
+} else {
+  sf::write_sf(all_str_sum_s,'data/pascale/all_streams_in_watersheds_of_interest_summarized_simple.gpkg')
+}
+} else {
+  if(stringr::str_detect(getwd(), 'scripts')){
+    all_str_sum_s = sf::read_sf('../data/pascale/all_streams_in_watersheds_of_interest_summarized_simple.gpkg')
+  } else {
+    all_str_sum_s = sf::read_sf('data/pascale/all_streams_in_watersheds_of_interest_summarized_simple.gpkg')
+  }
+}
+
+```
+
+```{r interactive_plot_with_all_streams}
+
+if(interactive()){
+  all_str_sum_s_wgs = sf::st_transform(all_str_sum_s, 4326)
+  
+  ggplot() + 
+    geom_sf(data = all_str_sum_s_wgs, aes(col = as.character(group_id))) + 
+    scale_color_brewer(palette = 'Set2') +
+    ggthemes::theme_map() + 
+    theme(legend.position = 'none')
+  
+  ggsave(filename = 'data/pascale/stream_group_colour_still.png',
+         width = 6, height = 6)
+  
+  group_ids = unique(all_str_sum_s_wgs$group_id)
+  
+  base_r = terra::rast(nrows = 3000, ncols = 3000, 
+                       xmin = st_bbox(all_str_sum_s_wgs)[1],
+                       xmax = st_bbox(all_str_sum_s_wgs)[3],
+                       ymin = st_bbox(all_str_sum_s_wgs)[2],
+                       ymax = st_bbox(all_str_sum_s_wgs)[4])
+  
+  rast_1 = all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == group_ids[1],] |> 
+    terra::vect() |> 
+    terra::rasterize(base_r)
+  
+  rast_2 = all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == group_ids[2],] |> 
+    terra::vect() |> 
+    terra::rasterize(base_r)
+  
+  terra::writeRaster(rast_1, paste0('data/pascale/raster_group_',group_ids[1],'.tif'), overwrite = TRUE)
+  terra::writeRaster(rast_2, paste0('data/pascale/raster_group_',group_ids[2],'.tif'), overwrite = TRUE)
+
+  }
+
+rast_gr_2 = terra::rast('../data/pascale/raster_group_2.tif')
+rast_gr_3 = terra::rast('../data/pascale/raster_group_3.tif')
+
+# terra::plot(rast_gr_2)
+group_pal = colorFactor(palette = 'Set1', domain = unique(str_on_b_g$group_id))
+
+ws_cols = colorFactor(palette = 'Set1', domain = wscd_t$SUB_DRAINAGE_AREA_CD)
+
+leaflet() |> 
+  addTiles(group = 'streets') |> 
+  addProviderTiles(providers$Esri.WorldTopoMap, group = 'topography') |> 
+  addProviderTiles(providers$CartoDB, group = 'cartoDB') |> 
+  addMapPane('polygon_pane', zIndex = 200) |> 
+  addMapPane('rast_gr_2_pane', zIndex = 300) |>
+  addMapPane('rast_gr_3_pane', zIndex = 400) |>
+  addMapPane('border_crossing_streams', zIndex = 500) |> 
+  addRasterImage(x = raster::raster(rast_gr_2),
+                 colors = RColorBrewer::brewer.pal(2, "Set1")[1],
+                 opacity = 1,
+                 group = 'Group 2',
+                 options = pathOptions(pane = 'rast_gr_2_pane')) |>
+  addRasterImage(x = raster::raster(rast_gr_3),
+                 colors = RColorBrewer::brewer.pal(2, "Set1")[3],
+                 opacity = 1,
+                 group = 'Group 3',
+                 options = pathOptions(pane = 'rast_gr_3_pane')) |>
+  addPolygons(
+    data = sf::st_transform(wscd_t, 4326),
+    label = ~SUB_DRAINAGE_AREA_CD,
+    fillColor = ~wscd_t$SUB_DRAINAGE_AREA_CD,
+    color = 'grey',
+    fillOpacity = 0,
+    group = 'watersheds',
+    options = pathOptions(pane = 'polygon_pane')
+  ) |>
+  addCircleMarkers(
+    data = sf::st_transform(sf::st_centroid(str_on_b_g), 4326),
+    color = 'orange',
+    fillColor = 'orange',
+    fillOpacity = 0.65,
+    radius = 3,
+    group = 'border_crossing_rivers',
+    options = pathOptions(pane = 'border_crossing_streams')
+  ) |> 
+  addPolylines(
+    data = sf::st_transform(str_on_b_g, 4326),
+    color = 'orange',
+    label = ~paste0('FWA code: ', stringr::str_remove_all(FWA_WATERSHED_CODE,"-000000.*"),
+                    '; Group ID: ',group_id),
+    group = 'border_crossing_rivers',
+    options = pathOptions(pane = 'border_crossing_streams')
+  ) |> 
+  leaflet::addLayersControl(
+    position = 'bottomright',
+    baseGroups = c('cartoDB','topography','streets'),
+    overlayGroups = c('watersheds','Group 2','Group 3','border_crossing_rivers'),
+    options = layersControlOptions(collapsed = FALSE)
+  ) |> 
+  addLegend(pal = group_pal, values = unique(str_on_b_g$group_id),
+            title = 'Hydrological Network ID') |> 
+  addLegend(title = htmltools::HTML('Streams Touching <br>Watershed Borders'),
+            colors = 'orange', labels = "Stream") |> 
+  leaflet.extras::addResetMapButton()
+```
+
+```{r simulate_infection_of_emerald_lake}
+if(interactive()){
+str_em_lake = all_str_sum_s_wgs |> 
+  sf::st_filter(em_lake |> sf::st_transform(4326)) |> 
+  dplyr::arrange(STREAM_ORDER) |> 
+  dplyr::slice(1)
+
+# Convert to tidygraph object
+tg <- as_tbl_graph(stream_conn)
+
+specific_fwa <- tg |> 
+  dplyr::filter(name == str_em_lake$FWA_WATERSHED_CODE) |> 
+  dplyr::pull(name)
+
+# Function to find nodes within n steps
+find_neighbors <- function(graph, node, steps) {
+  ig <- igraph::as.igraph(graph)
+
+  neighbors <- igraph::make_ego_graph(ig, order = steps, nodes = node)[[1]] |>
+    as_tbl_graph() |> 
+    as_tibble() |> 
+    pull(name)
+  neighbors
+}
+
+# Initialize a list to store the results
+neighbor_list <- list()
+
+# Find neighbors within 1 step, 2 steps, 3 steps, etc.
+for (steps in 1:10) {
+  
+  neighbor_nodes <- find_neighbors(tg, specific_fwa, steps-1)
+  neighbor_list[[steps]] <- neighbor_nodes
+  
+  g = ggplot() + 
+    geom_sf(data = wscd_t[wscd_t$SUB_DRAINAGE_AREA_CD == '08N',]) +
+    geom_sf(data = all_str_sum_s_wgs[all_str_sum_s_wgs$FWA_WATERSHED_CODE %in% (neighbor_list[[steps]]),],
+            col = 'red') + 
+    ggrepel::geom_text_repel(data = str_em_lake,
+            aes(geometry = geom,
+                label = 'Emerald Lake'),
+            stat = 'sf_coordinates',
+            nudge_x = 100000,
+            nudge_y = 30000) +
+    ggthemes::theme_map() + 
+    labs(title = paste0("Step ",steps))
+  
+  ggsave(filename = paste0(here::here(),"/output/emerald_lake_infection_gif/step_",steps,".jpeg"),
+         width = 3,
+         height = 3,
+         plot = g)
+}
+
+magick::image_read(
+  paste0(here::here(),"/output/emerald_lake_infection_gif/step_",c(1:10),".jpeg")) |> 
+  image_write_gif(path = paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"),
+                  delay = 1)
+}
+```
+
+### Animation of Potential Infection Spread {.tabset}
+
+This animation is somewhat exaggerated - each step includes the entirety of a waterbody. Sometimes this jump includes a very large distance. However, this animation may serve to illustrate just how connected waterbodies are within a watershed.
+
+#### Animation
+
+```{r make_and_show_gif, out.height=600, out.width=600}
+# magick::image_read(paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"))
+knitr::include_graphics(path = paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"))
+```
+
+#### Hide Animation

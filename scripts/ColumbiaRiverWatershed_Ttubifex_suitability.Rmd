@@ -14,11 +14,11 @@ max-width: 100%;
 }
 
 .page-inner {
-  padding: 40px 0px 0px 0px !important;
+ padding: 40px 0px 0px 0px !important;
 }
 
 .page-inner-section {
-  padding: 40px 0px 0px 0px;
+ padding: 40px 0px 0px 0px;
 }
 
 .Content {
@@ -46,6 +46,7 @@ library(whitebox)
 library(patchwork)
 library(tidyterra)
 library(leaflet)
+library(plotly)
 
 # If first time running whitebox, use 'install_whitebox()'
 wbt_init()
@@ -401,12 +402,17 @@ Slope was calculated for all `r summary_stats$streams_500m_or_more_in_length` st
 
 ```{r illustrative_stream_elevation_plot_for_slope}
 
-eg_stream = bcdata::bcdc_query_geodata('freshwater-atlas-stream-network') |> 
-  bcdata::filter(BLUE_LINE_KEY == 356364747) |> 
-  bcdata::collect() |> 
-  sf::st_zm() |> 
-  dplyr::group_by(BLUE_LINE_KEY) |> 
-  dplyr::summarise()
+if(!file.exists('data/eg_stream.gpkg')){
+  eg_stream = bcdata::bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+    bcdata::filter(BLUE_LINE_KEY == 356364747) |> 
+    bcdata::collect() |> 
+    sf::st_zm() |> 
+    dplyr::group_by(BLUE_LINE_KEY) |> 
+    dplyr::summarise()
+  sf::write_sf(eg_stream,'data/eg_stream.gpkg')
+} else {
+  eg_stream = sf::read_sf('data/eg_stream.gpkg')
+}
 
 p1 = ggplot() + 
   geom_sf(data = eg_stream) + 
@@ -480,6 +486,62 @@ p5 +
   labs(subtitle = "with {terra} function extract()")
 ```
 
+#### Interactive Stream Visualization
+
+```{r}
+# Get version of eg stream that has elevation built in...
+eg_stream_with_elev = bcdc_query_geodata('freshwater-atlas-stream-network') |>
+  filter(BLUE_LINE_KEY == 356364747) |>
+  collect() |>
+  dplyr::summarise()
+
+# Extract linestrings from eg stream with elevation
+linestrings <- st_cast(eg_stream_with_elev, "LINESTRING")
+
+points_df = linestrings |> 
+  dplyr::mutate(linestring_id = row_number()) |> 
+  group_by(linestring_id) |> 
+  st_coordinates() |> 
+  as_tibble() |> 
+  dplyr::rename(x=X,y=Y,z=Z,linestring_id = L1)
+
+xy_elevation <- as.data.frame(terra::aggregate(elev_for_eg_stream,10), xy = TRUE) |> 
+  dplyr::mutate(height = elevation,
+                elevation = elevation - 10)
+
+# Get the default camera settings
+default_camera <- list(
+  eye = list(x = NULL, y = NULL, z = NULL),
+  center = list(x = NULL, y = NULL, z = NULL),
+  up = list(x = NULL, y = NULL, z = NULL),
+  projection = list(type = NULL, scale = NULL)
+)
+
+# Adjust only the rotation angle in the X dimension
+rotation_x <- 90  # Rotate 90 degrees in the X direction
+
+# Modify the default camera settings with the rotation angle
+modified_camera <- default_camera
+modified_camera$eye$x <- -0.8  # Rotate 90 degrees in the X direction
+
+points_df |>
+  plotly::plot_ly(x = ~x, y = ~y, z = ~z) |> 
+  group_by(linestring_id) |> 
+  plotly::add_paths(x = ~x, y = ~y, z = ~z, line = list(width = 5)) |> 
+  plotly::add_mesh(data = xy_elevation, 
+           x = ~x, y = ~y, 
+           z = ~(elevation-10),
+           text = ~height) |> 
+  plotly::layout(
+    scene = list(
+      zaxis = list(range = c(0,max(xy_elevation$elevation))),
+      camera = modified_camera
+    ),
+    dragmode = 'turntable'
+  )
+
+```
+
 #### Streams with Slope \<= 4%
 
 ```{r remake_plots}
@@ -520,380 +582,215 @@ if(remake_plots | !file.exists('output/Streams with slope angle calculated.jpg')
 }
 ```
 
-```{r split_elevation_raster_by_watersheds}
-# if(!dir.exists('data/elevation_rasters')){
-#   dir.create('data/elevation_rasters')
-# }
-# 
-# if(!file.exists('data/elevation_rasters/columbia_river_elev.tif')){
-# col$MAJOR_WA_1 |> 
-#   iwalk( ~ {
-# 
-#     this_ws = col[col$MAJOR_WA_1 == .x,]
-#     
-#     this_watershed_label = snakecase::to_snake_case(this_ws$MAJOR_WA_1)
-# 
-#     col_cropped = mask(crop(col_elev,this_ws),this_ws)
-#     
-#     col_agg = terra::aggregate(col_cropped, fact = 2)
-#     
-#     writeRaster(col_agg, paste0('data/elevation_rasters/',this_watershed_label,'_elev.tif'),
-#                 overwrite = TRUE)
-#   })
-# }
+```{r download_watersheds_by_stream}
+
+if(!file.exists('data/watersheds_for_streams.gpkg')){
+  # Get all the FWA_WATERSHED_CODE's for our streams.
+  if(!file.exists('data/FWA_WATERSHED_CODES_by_BLK.csv')){
+    str_fwa_codes = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+      filter(BLUE_LINE_KEY %in% str_d$BLUE_LINE_KEY) |> 
+      collect() |> 
+      sf::st_drop_geometry() |> 
+      dplyr::select(BLUE_LINE_KEY, FWA_WATERSHED_CODE)
+    
+    write.csv(str_fwa_codes,'data/FWA_WATERSHED_CODES_by_BLK.csv', row.names = F)
+  } else {
+    str_fwa_codes = read.csv('data/FWA_WATERSHED_CODES_by_BLK.csv')
+  }
   
+  str_fwa_codes_unique = str_fwa_codes |> 
+    dplyr::distinct()
+  
+  # Cut away all the extraneous -000000's, place with wildcard % to make CQL query
+  str_fwa_codes_unique = str_fwa_codes_unique |> 
+    dplyr::mutate(FWA_WATERSHED_CODE = stringr::str_replace_all(FWA_WATERSHED_CODE,
+                                                                '-000000-.*','-%'))
+  # # This dataframe will house our results
+  # area_of_watersheds = tibble(
+  #   blk = str_fwa_codes_unique$BLUE_LINE_KEY
+  # ) |> 
+  #   dplyr::mutate(area_in_sq_km = 0,
+  #                 number_of_watersheds = 0) |> 
+  #   dplyr::filter(!duplicated(blk))
+  # 
+  # for(i in 1:nrow(str_fwa_codes_unique)){
+  #   print(i)
+  #   the_fwa = str_fwa_codes_unique[i,]$FWA_WATERSHED_CODE
+  #   the_blk = area_of_watersheds[i,]$blk
+  #   the_cql_query = CQL(paste0("FWA_WATERSHED_CODE LIKE '",the_fwa,"'"))
+  #   
+  #   # If this row of the results table has not yet been filled in with an area value,
+  #   # search the BC Data Catalogue for all watersheds fitting the pattern of 
+  #   # the stream FWA_WATERSHED_CODE
+  #   if(area_of_watersheds[i,]$area_in_sq_km == 0){
+  #   the_watersheds = bcdc_query_geodata('freshwater-atlas-watersheds') |> 
+  #     filter(the_cql_query) |>
+  #     collect() |> 
+  #     dplyr::select(FWA_WATERSHED_CODE,FEATURE_AREA_SQM) |> 
+  #     sf::st_drop_geometry()
+  #   
+  #   number_of_watersheds = nrow(the_watersheds)
+  #   
+  #   area_of_watersheds[i,]$number_of_watersheds = number_of_watersheds
+  #   
+  #   output = the_watersheds |> 
+  #     dplyr::mutate(blk = the_blk) |> 
+  #     dplyr::group_by(blk) |> 
+  #     dplyr::summarise(total_area_in_sq_km = sum(FEATURE_AREA_SQM/1000)) |> 
+  #     dplyr::pull(total_area_in_sq_km)
+  #   
+  #   area_of_watersheds[i,]$area_in_sq_km = output
+  #   }
+  # }
+  # 
+  # unique_fwa_codes = unique(str_fwa_codes_unique$FWA_WATERSHED_CODE)
+  
+  watersheds_for_streams = bcdc_query_geodata('freshwater-atlas-watersheds') |> 
+    filter(CQL("FWA_WATERSHED_CODE LIKE '300-%'")) |> 
+    bcdata::select(FEATURE_AREA_SQM) |> 
+    collect()
+  
+  sf::write_sf(watersheds_for_streams,'data/watersheds_for_streams.gpkg')
+} else {
+  watersheds_for_streams = sf::read_sf('data/watersheds_for_streams.gpkg')
+}
 ```
 
-```{r running_fwapgr_method_on_20_streams_per_region}
+```{r}
+# For each stream, we need to sum together all the watersheds that feed into its FWA_WATERSHED_CODE.
+str_fwa_codes = read.csv('data/FWA_WATERSHED_CODES_by_BLK.csv') |> 
+  dplyr::distinct() |> 
+  as_tibble()
 
-if(rerun_fwapgr_watershed_delineation){
+if(!file.exists('data/watersheds_clumped_by_draining_BLK.gpkg')){
+
+  # watersheds_just_area = watersheds_for_streams |> 
+  #   sf::st_drop_geometry() |> 
+  #   dplyr::select(FWA_WATERSHED_CODE, area_sqm = FEATURE_AREA_SQM)
   
-  streams_less_than_four_degrees = sf::read_sf('data/ColumbiaWatershed_streams_less_than_four_degrees_slope.gpkg')
+  # Add in wildcard
+  str_fwa_codes = str_fwa_codes |> 
+    dplyr::mutate(FWA_WATERSHED_CODE = stringr::str_replace_all(FWA_WATERSHED_CODE,
+                                                                "-000000.*","-*"))
+
+  # which(str_fwa_codes$BLUE_LINE_KEY == 356364754)
+  test_blk = str_fwa_codes$BLUE_LINE_KEY[1]
+  test_fwa = str_fwa_codes$FWA_WATERSHED_CODE[1]  
   
-  regions_for_loop = unique(streams_less_than_four_degrees$watershed_name)
+  ggplot() +
+    geom_sf(data = watersheds_for_streams |>
+              dplyr::filter(stringr::str_detect(FWA_WATERSHED_CODE,
+                                                test_fwa)) |>
+              dplyr::summarise()
+    ) +
+    geom_sf(data = str_d[str_d$BLUE_LINE_KEY == test_blk,])
   
-  for(region in regions_for_loop){
-    
-    if(!dir.exists(paste0('output/watershed_delineation_plots/',region))){
-      dir.create(paste0('output/watershed_delineation_plots/',region))
-    }
-    
-    # If we do not yet have up to 20 streams processed and a .CSV file to report their
-    # areas, process up to 20 for the selected region
-    
-    if(!file.exists(paste0('output/stream_lists_with_area/',region,'_streams.csv'))){
-      
-      streams_of_region = streams_less_than_four_degrees |> 
-        dplyr::filter(watershed_name == region)
-      
-      ws_area_list = data.frame(id = c(1:nrow(streams_of_region)),
-                                BLK = streams_of_region$BLUE_LINE_KEY,
-                                area = NA,
-                                watershed_name = region)
-      
-      number_streams_in_region = nrow(streams_of_region)
-      
-      if(number_streams_in_region < 20){
-        sample_size = number_streams_in_region
-      } else {
-        sample_size = 20
-      }
-      
-      rows_to_run = sample(x = 1:number_streams_in_region, size = sample_size)
-      
-      for(i in rows_to_run){
-        
-        index_of_stream = which(rows_to_run == i)
-        
-        print(paste0(index_of_stream,' of ',length(rows_to_run), ' for ',region))
-        
-        the_stream = streams_of_region[i,]
-        the_blk = the_stream$BLUE_LINE_KEY
-        
-        tryCatch(
-          expr = {
-            fwa_test = st_transform(
-              fwapgr::fwa_watershed_at_measure(
-                blue_line_key = the_blk,
-                downstream_route_measure = 50), 
-              3005)
-            
-            print('Finished finding watershed')
-            
-            fwa_elev = terra::crop(col_elev, st_bbox(fwa_test))
-            streams_for_plot = sf::st_crop(streams_of_region, st_bbox(fwa_test))
-            
-            ggplot() + 
-              geom_raster(data = as.data.frame(fwa_elev, xy = TRUE),
-                          aes(x=x,y=y,fill=elevation)) +
-              geom_sf(data = fwa_test, fill = 'transparent', col = 'red') + 
-              geom_sf(aes(col = flagged), data = streams_for_plot |> 
-                        dplyr::mutate(flagged = BLUE_LINE_KEY == the_blk)) + 
-              coord_sf(xlim = st_bbox(fwa_test)[c(1,3)],
-                       ylim = st_bbox(fwa_test)[c(2,4)])
-            
-            ggsave(filename = paste0('output/watershed_delineation_plots/',region,'/stream_',i,'.png'),
-                   width = 6, height = 4)
-            
-            ws_area = st_area(fwa_test)
-            
-            ws_area_list[i,]$area <- ws_area
-            ws_area_list[i,]$watershed_name <- region
-            
-          },
-          error = function(e) {
-            ws_area_list[i,]$area <- NA
-            ws_area_list[i,]$watershed_name <- region
-          }
-        )
-      }
-      
-      ws_area_list = dplyr::bind_rows(ws_area_list) |> 
-        as_tibble()
-      
-      if(!dir.exists('output/stream_lists_with_area')){
-        dir.create('output/stream_lists_with_area')
-      }
-      
-      write.csv(ws_area_list, paste0('output/stream_lists_with_area/',unique(the_stream$watershed_name),'_streams.csv'),row.names = F)
-    }
-  }
+  # Cycle through each stream's FWA code, pulling together all watersheds
+  # that feed into that stream
+  watershed_clumps = 1:nrow(str_fwa_codes) |> 
+    purrr::map( ~ {
+      output = tryCatch(
+        expr = watersheds_for_streams |> 
+          dplyr::filter(stringr::str_detect(FWA_WATERSHED_CODE,str_fwa_codes$FWA_WATERSHED_CODE[.x])) |>
+          dplyr::summarise(BLUE_LINE_KEY = str_fwa_codes$BLUE_LINE_KEY[.x]) |> 
+          sf::st_simplify(dTolerance = 50),
+        error = function(e) return(NULL)
+      )
+      output
+    }) |> 
+    dplyr::bind_rows()
+  
+  watershed_clumps$area_sq_km = as.numeric(sf::st_area(watershed_clumps))/1000000
+  
+  sf::write_sf(watershed_clumps,
+               'data/watersheds_clumped_by_draining_BLK.gpkg')
+} else {
+  watershed_clumps = sf::read_sf('data/watersheds_clumped_by_draining_BLK.gpkg')
 }
 
+# Left join the area onto the stream 
+str_d = str_d |> 
+  dplyr::left_join(
+    watershed_clumps |> sf::st_drop_geometry()
+  )
+
 ```
 
-```{r running_stats_on_stream_mag_and_contributing_area}
-# if(!file.exists('output/Stream Magnitude Predicts Contributing Area.png')){
+### Contributing Area {.tabset}
 
-  stream_area_files = list.files('output/stream_lists_with_area',
-                                 pattern = '[^not_random].csv',
-                                 full.names = T) |> 
-    lapply(read.csv) |> 
-    dplyr::bind_rows() |> 
-    as_tibble()
-  
-  str_area = stream_area_files |> 
-    dplyr::filter(!is.na(area))
-  
-  # Some watershed delineations failed; I checked these by hand 
-  # and here describe which to remove...
-  rows_to_drop = tibble(
-    id = list(
-      columbia_river = c(4,101,184,284,400,574), #maybe 602?
-      illecillewaet_river = c(NULL),
-      kettle_river = c(61,131,153,208,342),
-      kicking_horse_river = c(2,3,6,8,32,47),
-      lower_kootenay_river = c(19,77,85,102,126,155),
-      okanagan_river = c(19,474,642,868,938,976),
-      pend_d_oreille_river_east = c(71,91),
-      pend_d_oreille_river_west = c(1,3,30),
-      spillimacheen_river = c(2,3),
-      upper_kootenay_river = c(4,39,43,752)
-    )
-  ) |> 
-    dplyr::mutate(watershed_name = names(id)) |> 
-    tidyr::unnest_longer(col = id) |> 
-    dplyr::mutate(drop = TRUE)
-  
-  str_area = str_area |> 
-    dplyr::left_join(rows_to_drop) |> 
-    dplyr::filter(is.na(drop)) |> 
-    dplyr::select(-drop) |>
-    dplyr::filter(!is.na(area))
-  
-  # Convert area from square meters to square kilometers.
-  str_area = str_area |> 
-  dplyr::mutate(area_sq_km = area*1e-6)
+The contributing area was derived from the Freshwater Atlas watersheds layer. Streams were linked to the appropriate delineating watershed(s) based on the FWA_WATERSHED_CODE field. The examples below depict a typical stream and its watershed and a 'lake-def skelet' (stream segment that follows the central axis of a lake) with its watershed.
 
-  blks_for_search = unique(str_area$BLK)
+```{r contributing_area_example}
 
-  # Add stream magnitude using the BLK.
-  str_mag = bcdata::bcdc_query_geodata('freshwater-atlas-stream-network') |> 
-    bcdata::filter(BLUE_LINE_KEY %in% blks_for_search) |> 
-    bcdata::collect() |> 
-    sf::st_drop_geometry() |> 
-    dplyr::select(BLK = BLUE_LINE_KEY, str_mag = STREAM_MAGNITUDE) |> 
-    dplyr::distinct() |> 
-    dplyr::group_by(BLK) |> 
-    dplyr::slice_max(str_mag) |> 
-    dplyr::ungroup()
-  
-  str_area = str_area |> 
-    dplyr::left_join(str_mag) |> 
-    dplyr::filter(!is.na(str_mag)) |> 
-    dplyr::group_by(BLK) |> 
-    dplyr::slice_max(str_mag) |> 
-    dplyr::ungroup()
-  
-  str_area = str_area |> 
-    dplyr::mutate(new_id = row_number())
-  
+dl_blk = 356570552 # Duncan Lake
+l_blk = 356569776 # Lardeau River
+
+# Get the lake-def skelet for Kootenay Lake.
+duncan_lake = bcdc_query_geodata('freshwater-atlas-lakes') |> 
+  filter(GNIS_NAME_1 == 'Duncan Lake',
+         BLUE_LINE_KEY == dl_blk) |> 
+  collect()
+
+eg_stream_name = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+  filter(BLUE_LINE_KEY == l_blk) |> 
+  collect() |> 
+  sf::st_drop_geometry() |> 
+  select(GNIS_NAME) |> 
+  distinct() |> 
+  pull(GNIS_NAME)
+
 ```
 
-## Assessing Relationship Between Stream Magnitude and Contributing Area {.tabset}
-
-Delineating watersheds for a large number of points is a difficult spatial analysis task: besides requiring a lot of time and computational resources, even the most commonly used tools frequently run into issues that result in incorrect watersheds (e.g., [the fantastic whitebox tools](https://www.whiteboxgeo.com/), [Poisson Consulting's open-source {fwapgr} R package](https://github.com/poissonconsulting/fwapgr)).
-
-Because stream magnitude (a measure of stream size and, therefore, quantity of flow) is available for all streams included in the [BC Freshwater Atlas](https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-stream-network), I argue that if a robust relationship could be found between the stream magnitude and the calculated contributing areas for a sample of streams whose watersheds were able to be successfully delineated, we could use this relationship to predict contributing area for all streams in the Freshwater Atlas.
-
-I proposed the simple model:
-
-$$C_{S} = \beta(M_{S})+\epsilon$$
-
-Where C stands for the contributing area of a given stream, 𝛃 stands for the coefficient term of stream magnitude (M), and 𝜖 stands for an error term (i.e. unexplained variation in C).
-
-I used random selection to choose 20 (or fewer, if there were fewer than 20 streams that met the \<4% slope and minimum 500 meter length criteria) streams from each watershed (Total N = 182). I used the "fwa_watershed_at_measure" function from the [{fwapgr}](https://github.com/poissonconsulting/fwapgr) R package to delineate an estimated watershed / contributing area for each of the streams. I visually evaluated each resulting watershed to determine if the process had critically failed (see example below), excluding such failures from the estimated contributing area data (final N = 141 streams successfully delineated).
-
-Note: I also attempted to delineate contributing areas for these streams using the Whitebox toolset but manual double-checking of the results showed fewer successful delineations than using the {fwapgr} package and its functions.
-
-### Successful Delineation
-
-See how the red line follows the contours of the elevation map to logically map out where water would flow into the target ('flagged') stream.
-
-```{r}
-m_1 = ggplot() + 
-  ggimage::geom_image(
-    aes(x=1,y=1,
-        image = 'output/watershed_delineation_plots/lower_kootenay_river/stream_137.png'
-    ),
-    size = 1.5) + 
-  labs(title = 'Successful delineation of watershed') +
+#### Lardeau River Example
+```{r lardeau_river_example}
+ggplot() + 
+  geom_sf(data = watershed_clumps[watershed_clumps$BLUE_LINE_KEY == l_blk,],
+          fill = 'white') + 
+  geom_sf(data = str_d[str_d$BLUE_LINE_KEY == l_blk,],
+          col = 'darkblue') + 
+  geom_sf_text(data = str_d[str_d$BLUE_LINE_KEY == l_blk,],
+               label = eg_stream_name[1],
+               nudge_x = -10000) +
+  geom_sf_text(data = sf::st_centroid(watershed_clumps[watershed_clumps$BLUE_LINE_KEY == l_blk,]), aes(label = paste0(round(watershed_clumps[watershed_clumps$BLUE_LINE_KEY == l_blk,]$area_sq_km,0),' km^2')),
+               nudge_y = 10000) +
+  labs(title = 'Lardeau River and its contributing area') +
+  ggspatial::annotation_scale() + 
   ggthemes::theme_map()
-
-m_1 
 ```
 
-### Unsuccessful Delineation
-
-This delineation attempt incorrectly included a large area for what is presumably a small stream section (given that we can't even see it on the map at this scale!)
-
+#### Duncan Lake Example
 ```{r}
-m_2 = ggplot() + 
-  ggimage::geom_image(
-    aes(x=1,y=1,
-        image = 'output/watershed_delineation_plots/lower_kootenay_river/stream_19.png'
-    ),
-    size = 1.5) + 
-  labs(title = 'Unsuccessful delineation of watershed') +
+
+dl_root_fwa_code = stringr::str_replace(duncan_lake$FWA_WATERSHED_CODE,'-000000.*','-%')
+
+if(!file.exists('data/DuncanLake_contributing_streams_subset.gpkg')){
+cql_query = CQL(paste0("FWA_WATERSHED_CODE LIKE '",dl_root_fwa_code,"'"))
+
+dl_contrib_streams = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+  filter(cql_query) |> 
+  collect() |> 
+  sf::st_zm()
+
+dl_contrib_streams_subset = dl_contrib_streams |> 
+  dplyr::filter(str_detect(FWA_WATERSHED_CODE,"300-625474-096683-[0-9]{6}-000000.*"))
+
+sf::write_sf(dl_contrib_streams_subset,
+             'data/DuncanLake_contributing_streams_subset.gpkg')
+} else {
+  dl_contrib_streams_subset = sf::read_sf('data/DuncanLake_contributing_streams_subset.gpkg')
+}
+
+ggplot() + 
+  geom_sf(data = watershed_clumps[watershed_clumps$BLUE_LINE_KEY == dl_blk,],
+          fill = 'white', col = 'black') +
+  geom_sf(data = dl_contrib_streams_subset, col = 'darkgrey', fill = 'darkgrey') +
+  geom_sf(data = duncan_lake, fill = 'darkblue') +
+  geom_sf_text(data = watershed_clumps[watershed_clumps$BLUE_LINE_KEY == dl_blk,],
+               aes(label = paste0(round(area_sq_km,0),' km^2')),
+               nudge_x = -6000) +
+  labs(title = 'Duncan Lake and its contributing area') +
+  ggspatial::annotation_scale() + 
   ggthemes::theme_map()
-
-m_2
-# ggpubr::ggarrange(
-#   m_1,
-#   m_2,
-#   ncol = 2
-# )
-```
-
-## Model Results {.tabset}
-
-The correlation is between stream magnitude and contributing area is `r round(cor(str_area$str_mag, str_area$area_sq_km),4)`!
-
-```{r plotly_of_area_by_magnitude}
-  # # Visual check
-  # plotly::ggplotly(
-  #   ggplot(str_area) + 
-  #     geom_point(aes(x = str_mag, y = area_sq_km, col = watershed_name)) + 
-  #     labs(color = 'Watershed Name',
-  #          x = 'Stream Magnitude\n(from BC Freshwater Atlas)',
-  #          y = 'Estimated Contributing Area (km^2)')
-  # )
-  
-```
-
-### Model Results as Text
-
-The GLM model results are as follows:
-
-```{r model}
-
-# Experimental - bring in some form of coordinates for streams as spatial autocorrelation covariate #
-# str_midpoints = str_d |> 
-#   dplyr::rename(BLK = BLUE_LINE_KEY) |> 
-#   dplyr::filter(BLK %in% str_area$BLK) |> 
-#   sf::st_transform(4326) |> 
-#   dplyr::group_by(BLK,watershed_name) |> 
-#   sf::st_cast('POINT') |> 
-#   dplyr::mutate(midpoint_of_vertices_in_stream = floor(n()/2)) |> 
-#   dplyr::mutate(row_id = row_number()) |> 
-#   dplyr::filter(row_id == midpoint_of_vertices_in_stream) |> 
-#   dplyr::ungroup() |> 
-#   dplyr::mutate(lat = st_coordinates(geom)[,2],
-#                 lng = st_coordinates(geom)[,1]) |> 
-#   sf::st_drop_geometry() |> 
-#   dplyr::select(BLK,watershed_name,lat,lng) |> 
-#   dplyr::group_by(BLK,watershed_name) |> 
-#   dplyr::summarise(lat = mean(lat, na.rm=T),
-#                    lng = mean(lng, na.rm=T)) |> 
-#   dplyr::ungroup()
-#   
-# # Join midpoints to str_area object
-# str_area = str_area |>
-#   dplyr::left_join(str_midpoints)
-
-# library(lme4)
-# library(spdep)
-# 
-# model <- lmer(area_sq_km ~ str_mag + (1 | watershed_name), data = str_area)
-# 
-# summary(model)
-# # Normal GLM
-# 
-# w = knearneigh(str_area |> dplyr::select(lat,lng), k = 5)
-# 
-# sar_model <- spdep::lm.LMtests(area_sq_km ~ str_mag + I(lat) + I(lng), data = str_area, listw = w)
-# summary(sar_model)
-res = glm(area_sq_km ~ str_mag, data = str_area)
-
-# plot(res, which = 1)
-# plot(res, which = 2)
-
-summary(res)
-
-# # Visualize the residuals
-# str_area$residuals = residuals(res)
-# ggplot(str_area, aes(lng, lat, colour = residuals)) +
-#   scale_color_gradient2() +
-#   geom_point(size = 3)
-
-library(broom)
-
-glm_res = tidy(res)
-
-# Results from these two LM methods is the same.
-# Equation: y = 2.181 + (1.667)*area_sq_km
-
-# trendline_x = min(str_area$str_mag):max(str_area$str_mag)
-# trendline_y = glm_res[1,]$estimate + glm_res[2,]$estimate*trendline_x
-# trendline = data.frame(x = trendline_x, y = trendline_y)
-# trendline$y_pos_ci = trendline$y*(1+1.96*glm_res[2,]$std.error)
-# trendline$y_neg_ci = trendline$y*(1-1.96*glm_res[2,]$std.error)
-
-# trendline_s = trendline[sample(1:nrow(trendline), 100, replace = F),]
-
-max_str_mag = max(str_area$str_mag)
-max_area_km =  max(str_area$area_sq_km)
-
-```
-
-### Model Results as Figure
-
-```{r}
-
-p_value_label = htmltools::HTML(paste0('P-value: ',
-                     str_extract(as.character(glm_res[2,]$p.value),'[0-9]{1}\\.[0-9]{3}'),' x 10<sup>-',
-                     str_extract(as.character(glm_res[2,]$p.value),'(?<=e-).*$'),
-                     "</sup>")
-    )
-
-g_for_plotly = ggplot(str_area) + 
-  geom_point(aes(x = str_mag, y = area_sq_km, color = watershed_name)) +
-  geom_smooth(aes(x = str_mag, y = area_sq_km),
-              method = mgcv::gam) +
-  geom_text(
-    data = data.frame(),
-    # data = data.frame(max_str_mag = max_str_mag,
-    #                   max_area_km = max_area_km,
-    #                   label = p_value_label),
-    aes(
-      x = 0.75 * unique(max_str_mag),
-      y = unique(max_area_km),
-      label = p_value_label
-    )
-  ) + 
-  # scale_colour_manual(values = c("95% Conf. Int." = "blue",
-                                 # "Mean" = "black")) +
-  labs(x = 'Stream Magnitude\n(from BC Freshwater Atlas)',
-       y = 'Estimated Contributing Area (kilometers<sup>2</sup>)',
-       title = 'Stream Magnitude Effectively Predicts Contributing Area',
-       subtitle = paste0('(for streams <= 4% slope in Columbia River watershed, N = ',nrow(str_area),')'),
-       color = 'Trendline Attributes')
-
-plotly::ggplotly(g_for_plotly)
-
-ggsave(plot = g_for_plotly,
-       filename = 'output/Stream Magnitude Predicts Contributing Area.png',width = 8, height = 6)
-
 ```
 
 # Predict Hypothetical *T. tubifex* Densities for All Streams {.tabset}
@@ -910,29 +807,29 @@ In addition, Whelan (2020) showed through sampling *T. tubifex* populations that
 
 ```{r predict_contributing_area_for_all_streams}
 
-# Get stream magnitudes.
-all_str_mags = list.files(path = 'data/streams',
-           pattern = '\\.gpkg$',
-           full.names = T) |> 
-  lapply(sf::read_sf) |> 
-  dplyr::bind_rows() |> 
-  sf::st_drop_geometry() |>
-  dplyr::group_by(BLUE_LINE_KEY,GNIS_NAME) |> 
-  dplyr::slice_max(STREAM_MAGNITUDE) |> 
-  dplyr::select(BLUE_LINE_KEY,GNIS_NAME,str_mag = STREAM_MAGNITUDE) |> 
-  dplyr::distinct() |> 
-  dplyr::ungroup()
+# # Get stream magnitudes.
+# all_str_mags = list.files(path = 'data/streams',
+#            pattern = '\\.gpkg$',
+#            full.names = T) |> 
+#   lapply(sf::read_sf) |> 
+#   dplyr::bind_rows() |> 
+#   sf::st_drop_geometry() |>
+#   dplyr::group_by(BLUE_LINE_KEY,GNIS_NAME) |> 
+#   dplyr::slice_max(STREAM_MAGNITUDE) |> 
+#   dplyr::select(BLUE_LINE_KEY,GNIS_NAME,str_mag = STREAM_MAGNITUDE) |> 
+#   dplyr::distinct() |> 
+#   dplyr::ungroup()
   
-# Confirm that there is only one (maximal) stream magnitude value for each
-# BLUE_LINE_KEY.
-str_d = str_d |> 
-  dplyr::left_join(all_str_mags) |> 
-  dplyr::filter(!is.na(str_mag)) |> 
-  dplyr::group_by(BLUE_LINE_KEY,GNIS_NAME) |> 
-  dplyr::slice_max(str_mag) |> 
-  dplyr::ungroup()
-
-str_d$contrib_area_pred = predict(res,str_d)
+# # Confirm that there is only one (maximal) stream magnitude value for each
+# # BLUE_LINE_KEY.
+# str_d = str_d |> 
+#   dplyr::left_join(all_str_mags) |> 
+#   dplyr::filter(!is.na(str_mag)) |> 
+#   dplyr::group_by(BLUE_LINE_KEY,GNIS_NAME) |> 
+#   dplyr::slice_max(str_mag) |> 
+#   dplyr::ungroup()
+# 
+# str_d$contrib_area_pred = predict(res,str_d)
 ```
 
 ```{r rasterize_stream_results}
@@ -962,7 +859,7 @@ cdat = sf::read_sf(paste0(here::here(),'/data/EMS_carbon_data_in_BC.gpkg'))
 
 ### First, predict tubifex density for each stream based on slope and contributing area
 
-str_d$tubifex = 1.635 + (-1.035)*str_d$slope_angle + (-0.0184)*str_d$contrib_area_pred
+str_d$tubifex = 1.635 + (-1.035)*str_d$slope_angle + (-0.0184)*str_d$area_sq_km
 
 # Extract tubifex density for each raster pixel
 r_cell_ids_per_stream_row = extract(r, str_d) |> 
@@ -976,25 +873,25 @@ r_cell_no_match = all_r_cells[!all_r_cells %in% unique(r_cell_ids_per_stream_row
 # id is the (row) id of the raster cell.
 
 r_cell_ids_per_stream_row$slope_angle = str_d[r_cell_ids_per_stream_row$ID,]$slope_angle
-r_cell_ids_per_stream_row$contrib_area_pred = str_d[r_cell_ids_per_stream_row$ID,]$contrib_area_pred
+r_cell_ids_per_stream_row$area_sq_km = str_d[r_cell_ids_per_stream_row$ID,]$area_sq_km
 
 # Summarise the two variables for each raster cell.
 # If there are multiple values, we take the more 'risky' one, e.g. the minimum slope angle
 info_for_r = r_cell_ids_per_stream_row |> 
   dplyr::group_by(id) |> 
   dplyr::summarise(slope_angle = min(slope_angle),
-                   contrib_area_pred = min(contrib_area_pred))
+                   area_sq_km = min(area_sq_km))
 
 r$slope_angle = 0
-r$contrib_area_pred = 0
+r$area_sq_km = 0
 
 r[info_for_r$id]$slope_angle = info_for_r$slope_angle
-r[info_for_r$id]$contrib_area_pred = info_for_r$contrib_area_pred
+r[info_for_r$id]$area_sq_km = info_for_r$area_sq_km
 
 # Calculate probability of tubifex presence for each raster pixel.
 r$tub_prob = 0
 
-tub_prob = 1.635 + (-1.035)*r$slope_angle + (-0.0184)*r$contrib_area_pred
+tub_prob = 1.635 + (-1.035)*r$slope_angle + (-0.0184)*r$area_sq_km
 
 tub_prob[tub_prob < 0] <- 0
 tub_prob = terra::mask(tub_prob, vect(col_s))
@@ -1059,14 +956,40 @@ ggplot() +
 
 ```{r}
 library(DT)
+
+if(!file.exists('data/stream_BLK_Name_lookup_table.csv')){
+# I need to snag names for the streams based on their BLK.
+uniq_BLK = unique(str_d$BLUE_LINE_KEY)
+
+cql_query = CQL(paste0("BLUE_LINE_KEY IN ('",paste0(uniq_BLK,collapse = "', '"),"')"))
+
+streams_for_names = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+  filter(cql_query) |> 
+  collect()
+
+streams_for_names = streams_for_names |> 
+  sf::st_drop_geometry() |> 
+  dplyr::select(BLUE_LINE_KEY, GNIS_NAME) |> 
+  dplyr::filter(!is.na(GNIS_NAME)) |> 
+  dplyr::distinct()
+
+streams_for_names |> write.csv('data/stream_BLK_Name_lookup_table.csv',row.names = F)
+} else {
+  streams_for_names = read.csv('data/stream_BLK_Name_lookup_table.csv')
+}
+
+# Bring in stream names from the GNIS_NAME column.
+str_d = str_d |> 
+  dplyr::left_join(streams_for_names)
+
 str_d |> 
   sf::st_drop_geometry() |> 
   dplyr::mutate(length_m = round(length, 1),
-                contrib_area_pred = round(contrib_area_pred,1),
+                area_sq_km = round(area_sq_km,1),
                 slope_angle = round(slope_angle,2),
                 tubifex_density_m2 = round(tubifex,2)) |> 
   dplyr::mutate(tubifex_density_m2 = ifelse(tubifex_density_m2 < 0, 0, tubifex_density_m2)) |> 
-  dplyr::select(BLK = BLUE_LINE_KEY,watershed_name,GNIS_NAME,slope_angle,contrib_area_pred_km2 = contrib_area_pred,tubifex_density_m2) |> 
+  dplyr::select(BLK = BLUE_LINE_KEY,Name = GNIS_NAME,watershed_name,slope_angle,area_sq_km,tubifex_density_m2) |> 
   DT::datatable(
     options = list(
       columnDefs = list(
@@ -1088,11 +1011,12 @@ str_d_wgs = sf::st_transform(str_d_very_simple, 4326)
 
 str_d_wgs = str_d_wgs |> 
   dplyr::mutate(length_m = round(length, 1),
-                contrib_area_pred = round(contrib_area_pred,1),
+                area_sq_km = round(area_sq_km,1),
                 slope_angle = round(slope_angle,2),
                 tubifex_density_m2 = round(tubifex,2)) |> 
   dplyr::mutate(tubifex_density_m2 = ifelse(tubifex_density_m2 < 0, 0, tubifex_density_m2)) |> 
-  dplyr::select(BLK = BLUE_LINE_KEY,watershed_name,GNIS_NAME,slope_angle,contrib_area_pred_km2 = contrib_area_pred,tubifex_density_m2)
+  dplyr::select(BLK = BLUE_LINE_KEY,watershed_name,GNIS_NAME,slope_angle,area_sq_km,tubifex_density_m2) |> 
+  dplyr::mutate(tubifex_density_m2 = replace_na(tubifex_density_m2, 0))
 
 # Fill in GNIS_NAME stream names for any rows with NA,
 # based on BLUE_LINE_KEY.
@@ -1113,30 +1037,17 @@ bbounds = data.frame(bounds = bin_boundaries[order(bin_boundaries)]) |>
   dplyr::mutate(bounds = stringr::str_remove_all(bounds, "(\\(|\\])")) |> 
   dplyr::mutate(bounds = stringr::str_replace_all(bounds, ",", " < x <= "))
 
-str_col_pal = leaflet::colorFactor(palette = 'Spectral', reverse = TRUE, domain = c(1:max(str_d_wgs$tubifex_bin)), levels = c(1:max(str_d_wgs$tubifex_bin)))
-
-# str_col_pal = leaflet::colorNumeric(palette = 'Spectral',
-#                                     domain = str_d_wgs$tubifex_density_m2,
-#                                     reverse = T)
-
-# str_popup_table = leafpop::popupTable(
-#   str_d_wgs |>
-#     sf::st_drop_geometry() |>
-#     dplyr::select(Name = GNIS_NAME,
-#                   BLK,
-#                   Slope = slope_angle,
-#                   `Contributing Area (km^2)` = contrib_area_pred_km2,
-#                   `Predicted Density` = tubifex_density_m2)
-# )
+str_col_pal = leaflet::colorFactor(palette = 'Spectral', reverse = TRUE, domain = c(1:max(str_d_wgs$tubifex_bin,na.rm=T)), levels = c(1:max(str_d_wgs$tubifex_bin,na.rm=T)))
 
 l = leaflet() |>
-  addProviderTiles(providers$CartoDB) |> 
+  addProviderTiles(providers$CartoDB) |>
+  addMapPane(name = 'raster_pane', zIndex = 250) |> 
   addMapPane(name = 'pane_1', zIndex = 300) |> 
   addMapPane(name = 'pane_2', zIndex = 350) |> 
   addMapPane(name = 'pane_3', zIndex = 400) |> 
   addMapPane(name = 'pane_4', zIndex = 450)
   
-for(i in 1:max(str_d_wgs$tubifex_bin)){
+for(i in 1:max(str_d_wgs$tubifex_bin,na.rm=T)){
   these_popup_tables = leafpop::popupTable(
     str_d_wgs |>
       dplyr::filter(tubifex_bin == i) |> 
@@ -1144,7 +1055,7 @@ for(i in 1:max(str_d_wgs$tubifex_bin)){
       dplyr::select(Name = GNIS_NAME,
                     BLK,
                     Slope = slope_angle,
-                    `Contributing Area (km^2)` = contrib_area_pred_km2,
+                    `Contributing Area (km^2)` = area_sq_km,
                     `Predicted Density` = tubifex_density_m2)
   )
   
@@ -1159,13 +1070,7 @@ for(i in 1:max(str_d_wgs$tubifex_bin)){
     )
 }
 
-# addPolylines(
-#     data = str_d_wgs,
-#     label = ~paste0(ifelse(!is.na(GNIS_NAME), GNIS_NAME, 'No Name')),
-#     popup = ~lapply(str_popup_table, htmltools::HTML),
-#     color = ~str_col_pal(tubifex_density_m2)
-#   ) |>
-l |>
+l = l |>
   addLegend(
     title = '<em>T. tubifex</em><br>predicted<br> density<br>',
     pal = leaflet::colorFactor(
@@ -1178,11 +1083,44 @@ l |>
       paste0(bbounds$bounds)
     }
   ) |>
-  addScaleBar() |> 
+  addScaleBar('bottomleft') |> 
   leaflet.extras::addResetMapButton() |> 
   leaflet::addLayersControl(
-    overlayGroups = c('bin_1','bin_2','bin_3','bin_4'),
+    position = 'bottomleft',
+    overlayGroups = c('bin_1','bin_2','bin_3','bin_4','probability_raster'),
     options = layersControlOptions(collapsed = FALSE)
   )
 
+# Add in the result raster as a layer here too.
+raster_pal = leaflet::colorNumeric('Reds',
+                                   domain = unique(terra::values(tub_prob_w_carbon)),
+                                   na.color = 'white')
+
+raster_pal_legend = leaflet::colorNumeric(
+  'Reds',
+  reverse = T,
+  domain = unique(terra::values(tub_prob_w_carbon)),
+  na.color = 'white')
+
+l = l |> 
+  leaflet::addRasterImage(
+    colors = raster_pal,
+    x = tub_prob_w_carbon,
+    group = 'probability_raster',
+    options = pathOptions(pane = 'raster_pane')
+    ) |> 
+  leaflet::addLegend(
+    pal = raster_pal_legend,
+    values = unique(terra::values(tub_prob_w_carbon)),
+    group = 'probability_raster',
+    labFormat = labelFormat(transform = function(x) sort(x, decreasing = TRUE)))
+
+l
 ```
+
+```{r save_probability_raster_to_disk}
+names(tub_prob_w_carbon) <- "predicted_tubifex_density"
+terra::writeRaster(tub_prob_w_carbon, 'output/Predicted_Ttubifex_density.tif',
+                   overwrite = TRUE)
+```
+
