@@ -1,0 +1,155 @@
+---
+title: "Proposed_eDNA_Sites"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Description: 
+
+This script takes some data that Trevor Davies sent me to make a map of proposed eDNA sampling sites, with watersheds as shaded baselayer.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = F)
+#libraries
+# library(crosstalk)
+library(tidyverse)
+library(sf)
+library(openxlsx)
+library(bcdata)
+library(basemaps)
+```
+
+```{r get_data}
+
+setwd(here::here())
+
+# Load in data
+ss = read.xlsx('data/2024 eDNA Sampling Sites.xlsx')
+
+# Spatialize the sampling site table; reproject to BC Albers.
+ss = ss |>
+  st_as_sf(coords = c("Easting","Northing"), crs = 2955) |>
+  sf::st_transform(crs = 3005)
+
+sample_bbox = st_bbox(st_buffer(st_as_sfc(sf::st_bbox(ss)), 10000))
+
+if(!file.exists('data/interactive_eDNA_data/ws.gpkg')){
+  
+  # Get watersheds in area.
+  ws = bcdc_query_geodata('freshwater-atlas-watershed-groups') |>
+    filter(INTERSECTS(ss)) |>
+    collect()
+  
+  sf::write_sf(ws, 'data/interactive_eDNA_data/ws.gpkg')
+} else {
+  ws = sf::read_sf('data/interactive_eDNA_data/ws.gpkg')
+}
+
+ws_borders = ws |>
+  dplyr::summarise()
+
+ws_borders_s = rmapshaper::ms_simplify(ws_borders)
+
+if(!file.exists('data/interactive_eDNA_data/big_rivers_in_ws.gpkg')){
+# Nab large rivers in that area.
+big_rivers_in_ws = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+  bcdata::filter(STREAM_ORDER > 5) |> 
+  bcdata::filter(INTERSECTS(ws_borders_s)) |> 
+  collect() |> 
+  sf::st_zm()
+
+big_rivers_in_ws = big_rivers_in_ws |> 
+  dplyr::group_by(GNIS_NAME, BLUE_LINE_KEY, STREAM_ORDER) |> 
+  dplyr::summarise() |> 
+  dplyr::ungroup()
+
+big_rivers_in_ws = sf::st_transform(big_rivers_in_ws, 4326)
+
+sf::write_sf(big_rivers_in_ws, 'data/interactive_eDNA_data/big_rivers_in_ws.gpkg')
+} else {
+  big_rivers_in_ws = sf::read_sf('data/interactive_eDNA_data/big_rivers_in_ws.gpkg')
+}
+
+# Map bbox based on watershed shapes.
+map_bb = st_bbox(ws_borders)
+```
+
+```{r}
+# Make crosstalk object for ss
+# ss_shared = SharedData$new(ss)
+```
+
+```{r make_map}
+library(leaflet)
+
+ws_colour = leaflet::colorFactor(palette = 'Dark2',
+                               domain = ws$WATERSHED_GROUP_NAME)
+
+ss_type = leaflet::colorFactor(palette = 'Spectral',
+                               domain = ss$Type)
+
+
+l = leaflet(elementId = 'map') |>
+  addTiles(group = 'Streets') |>
+  leaflet::addMapPane(name = 'watersheds', zIndex = 200) |> 
+  leaflet::addMapPane(name = 'rivers', zIndex = 300) |> 
+  leaflet::addMapPane(name = 'sample_sites', zIndex = 500) |> 
+  addProviderTiles(provider = providers$OpenTopoMap,
+                   options = providerTileOptions(opacity = 0.5),
+                   group = 'Topography') |>
+  addLayersControl(
+    position = 'bottomright',
+    baseGroups = c('Streets','Topography'),
+    overlayGroups = c('watersheds','large rivers','eDNA sample sites'),
+    options = layersControlOptions(collapsed = F)
+  ) |> 
+  addScaleBar('bottomleft') |>
+  leaflet.extras::addResetMapButton()
+  
+l = l |> 
+  addPolygons(
+    weight = 1,
+    data = st_transform(ws, 4326),
+    label = ~paste0("Watershed: ",WATERSHED_GROUP_NAME),
+    color = ~ws_colour(WATERSHED_GROUP_NAME),
+    fillColor = ~ws_colour(WATERSHED_GROUP_NAME),
+    fillOpacity = 0.20,
+    options = pathOptions(pane = 'watersheds'),
+    group = 'watersheds'
+  ) |>
+  addPolylines(
+    data = big_rivers_in_ws,
+    label = ~paste0("River: ",GNIS_NAME),
+    weight = ~(STREAM_ORDER/5)^2,
+    color = 'darkblue',
+    opacity = 0.75,
+    options = pathOptions(pane = 'rivers'),
+    group = 'large rivers'
+  ) |> 
+  addCircleMarkers(
+    data = st_transform(ss, 4326),
+    label = ~paste0("Sampling Location: ",Location," (",Location2,")"),
+    radius = 5,
+    weight = 1,
+    # color = ~ss_type(Type),
+    color = 'black',
+    fillColor = ~ss_type(Type),
+    opacity = 1,
+    fillOpacity = 0.8,
+    options = pathOptions(pane = 'sample_sites'),
+    group = 'eDNA sample sites'
+  ) |>
+  addLegend(title = "Watersheds",
+            position = 'topright',
+            pal = ws_colour,
+            values = ws$WATERSHED_GROUP_NAME) |> 
+  addLegend(title = "Sample Type",
+            position = 'bottomleft',
+            pal = ss_type,
+            values = ss$Type)
+```
+
+```{r print_map, out.width="1000px", out.height = "600px"}
+l
+```

@@ -8,5 +8,12 @@
 data/*
 docs/*
 scripts/*.html
-output/*
+*.jpeg
+*.tif
+*.png
+*.jpg
+*.gif
+*.html
+*.xlsx
+*.csv
 scripts/images/*

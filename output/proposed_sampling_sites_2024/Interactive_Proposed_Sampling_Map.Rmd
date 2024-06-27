@@ -1,0 +1,94 @@
+---
+title: "Interactive Map of Proposed Sampling Sites"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = F)
+#libraries
+library(tidyverse)
+library(sf)
+library(openxlsx)
+library(bcdata)
+library(basemaps)
+```
+
+```{r get_data}
+
+setwd(here::here())
+
+# Make simple BC boundary shape
+# bc = bcmaps::bc_bound() |> dplyr::summarise() |> rmapshaper::ms_simplify()
+
+# Load in data
+ss = read.xlsx('data/2024 Sampling Sites.xlsx', sheet = 'locations')
+
+# Spatialize the sampling site table; reproject to BC Albers.
+ss = ss |>
+  st_as_sf(coords = c("easting","northing"), crs = 2955) |>
+  sf::st_transform(crs = 3005)
+
+sample_bbox = st_bbox(st_buffer(st_as_sfc(sf::st_bbox(ss)), 10000))
+
+# Get watersheds in area.
+ws = bcdc_query_geodata('freshwater-atlas-watershed-groups') |>
+  filter(INTERSECTS(sample_bbox)) |>
+  filter(!WATERSHED_GROUP_NAME %in% c("Upper Arrow Lake","Lower Arrow Lake",
+                                     "Slocan River","Kootenay Lake",
+                                     "Duncan Lake")) |>
+  collect()
+
+ws_borders = ws |>
+  dplyr::summarise()
+
+# Map bbox based on watershed shapes.
+map_bb = st_bbox(ws_borders)
+```
+
+```{r make_map, out.width="1000px", out.height = "600px"}
+library(leaflet)
+
+ws_fill = leaflet::colorFactor(palette = 'Spectral',
+                               domain = ws$WATERSHED_GROUP_NAME)
+
+leaflet() |>
+  addTiles(group = 'Streets') |>
+  addProviderTiles(provider = providers$OpenTopoMap,
+                   options = providerTileOptions(opacity = 0.5),
+                   group = 'Topography') |>
+  addPolygons(
+    data = st_transform(ws_borders, 4326),
+    fillColor = 'transparent',
+    color = 'black',
+    weight = 2
+  ) |>
+  addPolygons(
+    color = 'grey',
+    weight = 1,
+    data = st_transform(ws, 4326),
+    label = ~paste0("Watershed: ",WATERSHED_GROUP_NAME),
+    fillColor = ~ws_fill(WATERSHED_GROUP_NAME),
+    fillOpacity = 0.35
+  ) |>
+  addCircleMarkers(
+    data = st_transform(ss, 4326),
+    label = ~paste0("Sampling Location: ",Location),
+    radius = 1,
+    color = 'black',
+    opacity = 0.5,
+    fillColor = 'darkred'
+  ) |>
+  addLayersControl(
+    position = 'bottomright',
+    baseGroups = c('Streets','Topography'),
+    options = layersControlOptions(collapsed = F)
+  ) |>
+  addScaleBar('bottomleft') |>
+  addLegend(position = 'topright',
+            pal = ws_fill,
+            values = ws$WATERSHED_GROUP_NAME) |>
+  leaflet.extras::addResetMapButton()
+```
+
