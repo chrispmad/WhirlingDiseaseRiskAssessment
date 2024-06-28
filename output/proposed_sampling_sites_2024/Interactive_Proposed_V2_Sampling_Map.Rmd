@@ -39,6 +39,14 @@ ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_location
   tidyr::as_tibble() |>
   purrr::set_names(snakecase::to_snake_case)
 
+# Alouette is in a different CRS. Convert.
+al = ss |> 
+  dplyr::filter(str_detect(location_1,'Alouette'))
+
+al = al |> 
+  sf::st_as_sf(coords = c('easting','northing'), crs = 26910) |> 
+  sf::st_transform(crs = 3005)
+
 # delete_row = which(ss$region == 'OLD')
 # 
 # ss = ss |>
@@ -46,8 +54,11 @@ ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_location
 
 # Spatialize the sampling site table; reproject to BC Albers.
 ss = ss |>
+  dplyr::filter(!str_detect(location_1,'Alouette')) |> 
   st_as_sf(coords = c("easting","northing"), crs = 2955) |>
   sf::st_transform(crs = 3005)
+
+ss = dplyr::bind_rows(ss, al)
 
 sample_bbox = st_bbox(st_buffer(st_as_sfc(sf::st_bbox(ss)), 10000))
 
