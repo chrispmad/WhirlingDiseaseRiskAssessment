@@ -112,7 +112,9 @@ border_08N_b = border_08N |>
 
 <!-- ### Streams Along Border of 08N that Touch Target Watersheds -->
 
-<!-- Note: these streams are quite hard to see - look for tiny red lines along the border of 08N with the other watersheds. --><!-- Note: these streams are quite hard to see - look for tiny red lines along the border of 08N with the other watersheds. -->
+<!-- Note: these streams are quite hard to see - look for tiny red lines along the border of 08N with the other watersheds. -->
+
+<!-- Note: these streams are quite hard to see - look for tiny red lines along the border of 08N with the other watersheds. -->
 
 ```{r find_streams_near_border_of_08N}
 # Use the un-summarized version of the watersheds. Find the ones that 
@@ -182,10 +184,12 @@ if(!file.exists('data/pascale/streams_along_08N_border.gpkg') & !file.exists('..
 #   geom_sf(data = str_on_b, col = 'red')
 ```
 
-### Connectivity Analysis: 
+### Connectivity Analysis:
+
 #### Which Streams and Rivers Are Physically Connected?
 
-The data source for streams and rivers in British Columbia is the open-access 'Freshwater Atlas', in particular the [Freshwater Atlas Stream Network](https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-stream-network) layer. A key field in this layer that describes flow direction and connectivity is the 'FWA_WATERSHED_CODE', which looks like this: 
+The data source for streams and rivers in British Columbia is the open-access 'Freshwater Atlas', in particular the [Freshwater Atlas Stream Network](https://catalogue.data.gov.bc.ca/dataset/freshwater-atlas-stream-network) layer. A key field in this layer that describes flow direction and connectivity is the 'FWA_WATERSHED_CODE', which looks like this:
+
 ```{r}
 str_on_b[1,]$FWA_WATERSHED_CODE
 ```
@@ -278,6 +282,7 @@ eg_str_g = eg_str |>
 ```
 
 #### Connectivity Delineated and Abstraction Exemplified
+
 ```{r visually_explain_abstraction_to_tidygraph}
 eg_tidy = stream_conn |> 
   tidygraph::as_tbl_graph() |> 
@@ -320,7 +325,11 @@ g + right_arrow_plot + abstract_g +
 
 Note that the present analysis does not (yet) include assessments of flow direction nor of obstacles to fish passage. Inclusion of such factors would theoretically reduce the number of stream/river connections that pose a risk for introduction of aquatic freshwater invasive species. Therefore, a simple analysis of physical connectivity between water bodies (streams, rivers, lakes) is potentially the most risk-averse.
 
-### Interactive Plot with All Streams and Border-Crossing Streams Marked
+### Interactive Plot with Stream Networks and Streams Touching Watershed Borders Marked
+
+Note: Only hydrological networks with 100 or more streams are shown in this map, and very small streams of stream order 1 and 2 are not shown on this map; however, the connectivity analysis included all streams / rivers / lakes in B.C.
+
+Note: Watershed borders were buffered by 100 meters and any streams that intersected with this buffered layer were considered to touch the watershed border.
 
 ```{r assign_group_components_to_all_streams_in_analysis}
 # Find group ID of the streams from above.
@@ -426,8 +435,20 @@ all_str_in_ws = purrr::map(stream_gpkgs, ~ {
 # Add on graph component ids; drop components that aren't in the handful we identified as 
 # border-crossing groups!
 all_str_in_ws = all_str_in_ws |> 
-  dplyr::left_join(all_streams_w_group_ids) |> 
-  dplyr::filter(group_id %in% unique(str_on_b_g$group_id))
+  dplyr::left_join(all_streams_w_group_ids)
+
+# Re-enumerate the group_ids, starting from 1
+unique_group_levels = unique(all_str_in_ws[!is.na(all_str_in_ws$group_id),]$group_id)
+
+group_corrector = data.frame(group_id = unique_group_levels[order(unique_group_levels)]) |> 
+  dplyr::mutate(new_group_id = row_number())
+
+all_str_in_ws = all_str_in_ws |> 
+  dplyr::left_join(group_corrector) |> 
+  dplyr::mutate(group_id = new_group_id) |> 
+  dplyr::select(-new_group_id)
+
+# dplyr::filter(group_id %in% unique(str_on_b_g$group_id))
 
 if(stringr::str_detect(getwd(), 'scripts')){
   sf::write_sf(all_str_in_ws,'../data/pascale/all_streams_in_watersheds_of_interest.gpkg')
@@ -482,12 +503,26 @@ if(stringr::str_detect(getwd(), 'scripts')){
   }
 }
 
+# Drop NA group?
+all_str_sum_s = all_str_sum_s |> dplyr::filter(!is.na(group_id))
 ```
 
 ```{r interactive_plot_with_all_streams}
 
+all_str_sum_s_wgs = sf::st_transform(all_str_sum_s, 4326)
+
+# Number of streams in each group; keep only those with > 100
+groups_to_keep = all_str_sum_s_wgs |> 
+  sf::st_drop_geometry() |> 
+  dplyr::count(group_id, sort = T) |> 
+  dplyr::filter(n > 100) |> 
+  dplyr::pull(group_id)
+
+all_str_sum_s_wgs = all_str_sum_s_wgs |> dplyr::filter(group_id %in% groups_to_keep)
+
+group_ids = unique(all_str_sum_s_wgs$group_id)
+
 if(interactive()){
-  all_str_sum_s_wgs = sf::st_transform(all_str_sum_s, 4326)
   
   ggplot() + 
     geom_sf(data = all_str_sum_s_wgs, aes(col = as.character(group_id))) + 
@@ -498,60 +533,125 @@ if(interactive()){
   ggsave(filename = 'data/pascale/stream_group_colour_still.png',
          width = 6, height = 6)
   
-  group_ids = unique(all_str_sum_s_wgs$group_id)
-  
   base_r = terra::rast(nrows = 3000, ncols = 3000, 
                        xmin = st_bbox(all_str_sum_s_wgs)[1],
                        xmax = st_bbox(all_str_sum_s_wgs)[3],
                        ymin = st_bbox(all_str_sum_s_wgs)[2],
                        ymax = st_bbox(all_str_sum_s_wgs)[4])
   
-  rast_1 = all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == group_ids[1],] |> 
-    terra::vect() |> 
-    terra::rasterize(base_r)
+  1:length(unique(all_str_sum_s_wgs$group_id)) |> 
+    purrr::iwalk( ~ {
+      print(.x)
+      the_group_id = group_ids[[.x]]
+      group_dat = all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == the_group_id,] |> 
+        terra::vect() |> 
+        terra::rasterize(base_r)
+      
+      # Crop to bounding box of this group.
+      # terra::plot(group_dat)
+      
+      cropper = terra::ext(terra::vect(all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == the_group_id,]))
+      
+      # terra::plot(cropper, add = T)
+      group_dat_c = terra::mask(terra::crop(group_dat, cropper), cropper)
+      # terra::plot(group_dat_c)
+      
+      terra::writeRaster(group_dat_c, paste0('data/pascale/raster_group_',the_group_id,'.tif'), overwrite = TRUE)
+    }, .progress = TRUE)
   
-  rast_2 = all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == group_ids[2],] |> 
-    terra::vect() |> 
-    terra::rasterize(base_r)
-  
-  terra::writeRaster(rast_1, paste0('data/pascale/raster_group_',group_ids[1],'.tif'), overwrite = TRUE)
-  terra::writeRaster(rast_2, paste0('data/pascale/raster_group_',group_ids[2],'.tif'), overwrite = TRUE)
+  # rast_1 = all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == group_ids[1],] |> 
+  #   terra::vect() |> 
+  #   terra::rasterize(base_r)
+  # 
+  # rast_2 = all_str_sum_s_wgs[all_str_sum_s_wgs$group_id == group_ids[2],] |> 
+  #   terra::vect() |> 
+  #   terra::rasterize(base_r)
+  # 
+  # terra::writeRaster(rast_1, paste0('data/pascale/raster_group_',group_ids[1],'.tif'), overwrite = TRUE)
+  # terra::writeRaster(rast_2, paste0('data/pascale/raster_group_',group_ids[2],'.tif'), overwrite = TRUE)
 
   }
 
-rast_gr_2 = terra::rast('../data/pascale/raster_group_2.tif')
-rast_gr_3 = terra::rast('../data/pascale/raster_group_3.tif')
+if(interactive()){
+  raster_groups = list.files(path = 'data/pascale/',
+           pattern = 'raster_group_[0-9]+\\.tif',
+           full.names = T) |> 
+  lapply(terra::rast)
+} else {
+  raster_groups = list.files(path = '../data/pascale/',
+           pattern = 'raster_group_[0-9]+\\.tif',
+           full.names = T) |> 
+  lapply(terra::rast)
+}
+
+
+# terra::rast(raster_groups)
+# rast_gr_2 = terra::rast('../data/pascale/raster_group_2.tif')
+# rast_gr_3 = terra::rast('../data/pascale/raster_group_3.tif')
 
 # terra::plot(rast_gr_2)
-group_pal = colorFactor(palette = 'Set1', domain = unique(str_on_b_g$group_id))
+group_pal = colorFactor(palette = 'Set1', domain = group_ids)
 
 ws_cols = colorFactor(palette = 'Set1', domain = wscd_t$SUB_DRAINAGE_AREA_CD)
 
-leaflet() |> 
+l = leaflet() |> 
   addTiles(group = 'streets') |> 
   addProviderTiles(providers$Esri.WorldTopoMap, group = 'topography') |> 
   addProviderTiles(providers$CartoDB, group = 'cartoDB') |> 
-  addMapPane('polygon_pane', zIndex = 200) |> 
-  addMapPane('rast_gr_2_pane', zIndex = 300) |>
-  addMapPane('rast_gr_3_pane', zIndex = 400) |>
-  addMapPane('border_crossing_streams', zIndex = 500) |> 
-  addRasterImage(x = raster::raster(rast_gr_2),
-                 colors = RColorBrewer::brewer.pal(2, "Set1")[1],
-                 opacity = 1,
-                 group = 'Group 2',
-                 options = pathOptions(pane = 'rast_gr_2_pane')) |>
-  addRasterImage(x = raster::raster(rast_gr_3),
-                 colors = RColorBrewer::brewer.pal(2, "Set1")[3],
-                 opacity = 1,
-                 group = 'Group 3',
-                 options = pathOptions(pane = 'rast_gr_3_pane')) |>
+  addMapPane('polygon_pane', zIndex = 200) 
+  
+for(the_id in group_ids){
+  i = which(unique(all_str_sum_s_wgs$group_id) == the_id)
+  l = l |> 
+    addMapPane(paste0('rast_gr_',the_id,'_pane'), zIndex = (300 + i*50))
+}
+
+# addMapPane('rast_gr_2_pane', zIndex = 300) |>
+  # addMapPane('rast_gr_3_pane', zIndex = 400) |>
+ l = l |> 
+    addMapPane('border_crossing_streams', zIndex = 350 + length(group_ids)*50)
+    
+ # l |> 
+ #   addRasterImage(
+ #       raster::raster(raster_groups[[1]]),
+ #       colors = RColorBrewer::brewer.pal(length(unique(all_str_sum_s_wgs$group_id)), "Set1")[1],
+ #       opacity = 1,
+ #       group = paste0('Group ',group_ids[1]),
+ #       options = pathOptions(pane = paste0('rast_gr_',group_ids[1],'_pane'))
+ #       # options = pathOptions(pane = 'rast_gr_1_pane'))
+ #     )
+ for(i in 1:length(group_ids)){
+   
+   the_group_id = group_ids[order(group_ids)][i]
+   
+   l = l |> 
+     addRasterImage(
+       raster::raster(raster_groups[[i]]),
+       colors = RColorBrewer::brewer.pal(length(group_ids), "Set1")[i],
+       opacity = 1,
+       group = paste0('H. Network ',the_group_id),
+       options = pathOptions(pane = paste0('rast_gr_',group_ids[i],'_pane'))
+     )
+ }
+
+# addRasterImage(x = raster::raster(rast_gr_2),
+#                    colors = RColorBrewer::brewer.pal(2, "Set1")[1],
+#                    opacity = 1,
+#                    group = 'Group 2',
+#                    options = pathOptions(pane = 'rast_gr_2_pane')) |>
+#   addRasterImage(x = raster::raster(rast_gr_3),
+#                  colors = RColorBrewer::brewer.pal(2, "Set1")[3],
+#                  opacity = 1,
+#                  group = 'Group 3',
+#                  options = pathOptions(pane = 'rast_gr_3_pane')) |>
+ l |> 
   addPolygons(
     data = sf::st_transform(wscd_t, 4326),
     label = ~SUB_DRAINAGE_AREA_CD,
     fillColor = ~wscd_t$SUB_DRAINAGE_AREA_CD,
     color = 'grey',
     fillOpacity = 0,
-    group = 'watersheds',
+    group = 'Watersheds',
     options = pathOptions(pane = 'polygon_pane')
   ) |>
   addCircleMarkers(
@@ -560,7 +660,7 @@ leaflet() |>
     fillColor = 'orange',
     fillOpacity = 0.65,
     radius = 3,
-    group = 'border_crossing_rivers',
+    group = 'Streams touching borders',
     options = pathOptions(pane = 'border_crossing_streams')
   ) |> 
   addPolylines(
@@ -568,16 +668,17 @@ leaflet() |>
     color = 'orange',
     label = ~paste0('FWA code: ', stringr::str_remove_all(FWA_WATERSHED_CODE,"-000000.*"),
                     '; Group ID: ',group_id),
-    group = 'border_crossing_rivers',
+    group = 'streams touching borders',
     options = pathOptions(pane = 'border_crossing_streams')
   ) |> 
   leaflet::addLayersControl(
     position = 'bottomright',
     baseGroups = c('cartoDB','topography','streets'),
-    overlayGroups = c('watersheds','Group 2','Group 3','border_crossing_rivers'),
+    overlayGroups = c('Watersheds','Streams touching borders',
+                      paste0('H. Network ',group_ids[order(group_ids)])),
     options = layersControlOptions(collapsed = FALSE)
   ) |> 
-  addLegend(pal = group_pal, values = unique(str_on_b_g$group_id),
+  addLegend(pal = group_pal, values = unique(all_str_sum_s_wgs$group_id),
             title = 'Hydrological Network ID') |> 
   addLegend(title = htmltools::HTML('Streams Touching <br>Watershed Borders'),
             colors = 'orange', labels = "Stream") |> 
@@ -586,73 +687,224 @@ leaflet() |>
 
 ```{r simulate_infection_of_emerald_lake}
 if(interactive()){
-str_em_lake = all_str_sum_s_wgs |> 
-  sf::st_filter(em_lake |> sf::st_transform(4326)) |> 
-  dplyr::arrange(STREAM_ORDER) |> 
-  dplyr::slice(1)
-
-# Convert to tidygraph object
-tg <- as_tbl_graph(stream_conn)
-
-specific_fwa <- tg |> 
-  dplyr::filter(name == str_em_lake$FWA_WATERSHED_CODE) |> 
-  dplyr::pull(name)
-
-# Function to find nodes within n steps
-find_neighbors <- function(graph, node, steps) {
-  ig <- igraph::as.igraph(graph)
-
-  neighbors <- igraph::make_ego_graph(ig, order = steps, nodes = node)[[1]] |>
-    as_tbl_graph() |> 
-    as_tibble() |> 
-    pull(name)
-  neighbors
-}
-
-# Initialize a list to store the results
-neighbor_list <- list()
-
-# Find neighbors within 1 step, 2 steps, 3 steps, etc.
-for (steps in 1:10) {
+  str_em_lake = all_str_sum_s_wgs |> 
+    sf::st_filter(em_lake |> sf::st_transform(4326)) |> 
+    dplyr::arrange(STREAM_ORDER) |> 
+    dplyr::slice(1)
   
-  neighbor_nodes <- find_neighbors(tg, specific_fwa, steps-1)
-  neighbor_list[[steps]] <- neighbor_nodes
+  # Convert to tidygraph object
+  tg <- as_tbl_graph(stream_conn)
   
-  g = ggplot() + 
-    geom_sf(data = wscd_t[wscd_t$SUB_DRAINAGE_AREA_CD == '08N',]) +
-    geom_sf(data = all_str_sum_s_wgs[all_str_sum_s_wgs$FWA_WATERSHED_CODE %in% (neighbor_list[[steps]]),],
-            col = 'red') + 
-    ggrepel::geom_text_repel(data = str_em_lake,
-            aes(geometry = geom,
-                label = 'Emerald Lake'),
-            stat = 'sf_coordinates',
-            nudge_x = 100000,
-            nudge_y = 30000) +
-    ggthemes::theme_map() + 
-    labs(title = paste0("Step ",steps))
+  specific_fwa <- tg |> 
+    dplyr::filter(name == str_em_lake$FWA_WATERSHED_CODE) |> 
+    dplyr::pull(name)
   
-  ggsave(filename = paste0(here::here(),"/output/emerald_lake_infection_gif/step_",steps,".jpeg"),
-         width = 3,
-         height = 3,
-         plot = g)
-}
-
-magick::image_read(
-  paste0(here::here(),"/output/emerald_lake_infection_gif/step_",c(1:10),".jpeg")) |> 
-  image_write_gif(path = paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"),
-                  delay = 1)
+  # Function to find nodes within n steps
+  find_neighbors <- function(graph, node, steps) {
+    ig <- igraph::as.igraph(graph)
+    
+    neighbors <- igraph::make_ego_graph(ig, order = steps, nodes = node)[[1]] |>
+      as_tbl_graph() |> 
+      as_tibble() |> 
+      pull(name)
+    neighbors
+  }
+  
+  # Initialize a list to store the results
+  neighbor_list <- list()
+  
+  # Find neighbors within 1 step, 2 steps, 3 steps, etc.
+  for (steps in 1:10) {
+    
+    neighbor_nodes <- find_neighbors(tg, specific_fwa, steps-1)
+    neighbor_list[[steps]] <- neighbor_nodes
+    
+    g = ggplot() + 
+      geom_sf(data = wscd_t[wscd_t$SUB_DRAINAGE_AREA_CD == '08N',]) +
+      geom_sf(data = all_str_sum_s_wgs[all_str_sum_s_wgs$FWA_WATERSHED_CODE %in% (neighbor_list[[steps]]),],
+              col = 'red') + 
+      ggrepel::geom_text_repel(data = str_em_lake,
+                               aes(geometry = geom,
+                                   label = 'Emerald Lake'),
+                               stat = 'sf_coordinates',
+                               nudge_x = 100000,
+                               nudge_y = 30000) +
+      ggthemes::theme_map() + 
+      labs(title = paste0("Step ",steps))
+    
+    ggsave(filename = paste0(here::here(),"/output/emerald_lake_infection_gif/step_",steps,".jpeg"),
+           width = 3,
+           height = 3,
+           plot = g)
+  }
+  
+  magick::image_read(
+    paste0(here::here(),"/output/emerald_lake_infection_gif/step_",c(1:10),".jpeg")) |> 
+    image_write_gif(path = paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"),
+                    delay = 1)
 }
 ```
+
+```{r make_and_show_gif, out.height=600, out.width=600}
 
 ### Animation of Potential Infection Spread {.tabset}
 
-This animation is somewhat exaggerated - each step includes the entirety of a waterbody. Sometimes this jump includes a very large distance. However, this animation may serve to illustrate just how connected waterbodies are within a watershed.
+# This animation is somewhat exaggerated - each step includes the entirety of a waterbody. Sometimes this jump includes a very large distance. However, this animation may serve to illustrate just how connected waterbodies are within a watershed.
 
 #### Animation
 
-```{r make_and_show_gif, out.height=600, out.width=600}
+
 # magick::image_read(paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"))
-knitr::include_graphics(path = paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"))
-```
+# knitr::include_graphics(path = paste0(here::here(),"/output/emerald_lake_infection_gif/infection_gif.gif"))
 
 #### Hide Animation
+```
+
+### Invasive Mussel Defence Program Boat Inspections {.tabset}
+
+Map details:
+
+-   Inspection data span 2015 to present.
+
+-   This map only includes inspections of boats coming from Whirling Disease-infected states or provinces/territories in the USA and Canada, respectively. The number of inspections from these infected areas may be artificially high, as ALL inspections from, e.g., Alberta are included, not only inspections from infected waterbodies within Alberta.
+
+-   It also shows only those destination water bodies with 1000 or more inspections.
+
+#### Destination Waterbodies
+
+```{r imdp_destination_lakes}
+ws = sf::read_sf("C:/Users/CMADSEN/Downloads/ColumbiaRiverWatershed.kml")
+
+em_lake = bcdata::bcdc_query_geodata('freshwater-atlas-lakes') |> 
+  dplyr::filter(GNIS_NAME_1 == 'Emerald Lake',
+                WATERSHED_GROUP_ID == 79) |> 
+  bcdata::collect() |> 
+  dplyr::select(WATERSH = WATERSHED_GROUP_ID,
+                GNIS_NA = GNIS_NAME_1) |> 
+  dplyr::mutate(TotalInspections = 73, Simple_Counter = 4, Complex_Counter = 0, Very_Complex_Counter = 1, Non_Motorized_Counter = 125)
+
+dat = read_sf("W:/CMadsen/Projects/ZQMussels/data/Waterbodies_with_Inspection_Data_Summaries_all_years_WD_Infected_Areas.gpkg")
+
+dat = dat |> sf::st_transform(4326)
+
+# Add colours
+my_pal = leaflet::colorBin(palette = 'Spectral',
+                           domain = dat$TotalInspections,
+                           reverse = T)
+
+my_pal_l = leaflet::colorBin(palette = 'Spectral',
+                           domain = dat$TotalInspections)
+
+over_1000 = dat |> 
+  dplyr::filter(!GNIS_NA %in% c("Pacific Ocean","Dry Storage")) |> 
+  dplyr::filter(TotalInspections > 1000)
+
+popup_tbls = leafpop::popupTable(
+  over_1000 |> 
+    sf::st_drop_geometry() |> 
+    dplyr::select(WATERSH,GNIS_NA,TotalInspections,Simple_Counter,
+                  Complex_Counter,
+                  Very_Complex_Counter,Non_Motorized_Counter)
+)
+
+em_popup_tbl = leafpop::popupTable(
+  em_lake |> 
+    sf::st_drop_geometry() |> 
+    dplyr::select(WATERSH,GNIS_NA,TotalInspections,Simple_Counter,
+                  Complex_Counter,
+                  Very_Complex_Counter,Non_Motorized_Counter)
+)
+
+leaflet::leaflet() |> 
+  leaflet::addTiles(group = 'openstreetmap') |>
+  leaflet::addProviderTiles(provider = leaflet::providers$CartoDB, group = 'carto') |> 
+  leaflet::addPolygons(
+    data = ws,
+    color = 'grey',
+    fillColor = 'transparent'
+  ) |> 
+  leaflet::addPolygons(
+    data = sf::st_transform(em_lake, 4326),
+    fillColor = 'purple',
+    color = 'purple',
+    label = 'Emerald Lake',
+    popup = lapply(em_popup_tbl, shiny::HTML)
+  ) |> 
+  leaflet::addPolygons(
+    data = over_1000,
+    label = ~GNIS_NA,
+    popup = lapply(popup_tbls, shiny::HTML),
+    fillColor = ~my_pal(TotalInspections),
+    color = ~my_pal(TotalInspections),
+    opacity = 0.75,
+    fillOpacity = 0.75
+  ) |> 
+  leaflet::addLegend(
+    title = "Number of Inspections",
+    pal = my_pal,
+    values = over_1000$TotalInspections
+  ) |> 
+  leaflet::addScaleBar(position = 'bottomright') |> 
+  leaflet.extras::addResetMapButton() |> 
+  leaflet::addLayersControl(position = 'bottomleft',
+                            baseGroups = c('carto','openstreetmap'),
+                            options = leaflet::layersControlOptions(collapsed = F))
+
+```
+
+#### Source Locations
+
+```{r}
+if(!file.exists('../data/pascale/whirling_disease_infected_areas.gpkg')){
+  library(tigris)
+  library(canadianmaps)
+  # Get ALL states and provinces/territories.
+  usa = tigris::states(cb = TRUE)
+  canada = canadianmaps::PROV |> sf::st_transform(4269)
+  
+  # Clip away parts of the US that are not continental / far bits of Alaska.
+  canada_clipper = sf::st_bbox(canada)
+  canada_clipper[1] <- -180
+  canada_clipper[2] <- 0
+  canada_clipper = sf::st_as_sfc(canada_clipper)
+  
+  usa_c = sf::st_intersection(
+    usa,#|> sf::st_transform(4326),
+    canada_clipper #|> sf::st_transform(4269)
+  )
+  
+  # Filter for just those WD-infected states / provinces / territories.
+  usa_wd = usa_c |> 
+    dplyr::filter(STUSPS %in% c("WA","OR","CA","NV","ID","MT","WY","CO","UT","AZ","NM","NE",
+                                "MI","OH","WV","VA","NC","PA","NY","VT","NH","MA","RI","CT","NJ","DE","MC","DC",
+                                "AB")) |> 
+    dplyr::select(name = STUSPS)
+  
+  canada_wd = canada |> 
+    dplyr::filter(PT %in% c("WA","OR","CA","NV","ID","MT","WY","CO","UT","AZ","NM","NE",
+                            "MI","OH","WV","VA","NC","PA","NY","VT","NH","MA","RI","CT","NJ","DE","MC","DC",
+                            "AB")) |> 
+    dplyr::select(name = PT)
+  
+  wd = dplyr::bind_rows(usa_wd, canada_wd) |> 
+    dplyr::mutate(status = 'Whirling Disease Present')
+  
+  sf::write_sf(usa_c, '../data/pascale/USA_clipped.gpkg')
+  sf::write_sf(canada, '../data/pascale/canada.gpkg')
+  sf::write_sf(wd, '../data/pascale/whirling_disease_infected_areas.gpkg')
+} else {
+  usa_c = sf::read_sf('../data/pascale/USA_clipped.gpkg')
+  canada = sf::read_sf('../data/pascale/canada.gpkg')
+  wd = sf::read_sf('../data/pascale/whirling_disease_infected_areas.gpkg')
+}
+
+ggplot() +
+  geom_sf(data = usa_c) + 
+  geom_sf(data = canada) + 
+  geom_sf(data = wd, aes(fill = status)) +
+  scale_fill_manual(values = c('Whirling Disease Present' = 'purple')) +
+  ggthemes::theme_map() + 
+  theme(legend.position.inside = c(0,0.25)) + 
+  ggspatial::annotation_scale() + 
+  labs(fill = 'Source Area')
+```
