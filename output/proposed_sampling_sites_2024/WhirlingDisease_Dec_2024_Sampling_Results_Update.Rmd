@@ -1,0 +1,427 @@
+---
+title: "WD Sampling Results Update"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Description: 
+
+This script produces a static map and an interactive map of Whirling Disease sampling results, as of 2024-12-05 (December 5th). This document was produced on `r format(Sys.Date(),"%B %d, %Y")`.
+
+<br>
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = F)
+#libraries
+library(crosstalk)
+library(tidyverse)
+library(sf)
+library(openxlsx)
+library(bcdata)
+library(basemaps)
+library(DT)
+library(ggspatial)
+library(leaflet)
+library(patchwork)
+```
+
+```{r get_data}
+
+setwd(here::here())
+
+# Load in sampling site data.
+ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_locations') |>
+  tidyr::as_tibble() |>
+  purrr::set_names(snakecase::to_snake_case)
+
+# Join on Martina's results excel file.
+sampling_res = read.xlsx('J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Surveillance plan/2024 surveillance plan/2024 WD sampling locations and results_FINAL.xlsx')
+
+# Alouette is in a different CRS. Convert.
+al = ss |> 
+  dplyr::filter(str_detect(location_1,'Alouette')) |> 
+  dplyr::mutate(location_1 = 'Alouette Lake')
+
+al = al |> 
+  sf::st_as_sf(coords = c('easting','northing'), crs = 26910) |> 
+  sf::st_transform(crs = 3005)
+
+# Spatialize the sampling site table; reproject to BC Albers.
+ss = ss |>
+  dplyr::filter(!str_detect(location_1,'Alouette')) |> 
+  st_as_sf(coords = c("easting","northing"), crs = 2955) |>
+  sf::st_transform(crs = 3005)
+
+ss = dplyr::bind_rows(ss, al)
+
+sample_bbox = st_bbox(st_buffer(st_as_sfc(sf::st_bbox(ss)), 10000))
+
+# Get Columbia Watershed outline.
+col_watersh = sf::read_sf("W:/CMadsen/shared_data_sets/columbia_watershed_priority_area.gpkg")
+
+# if(!file.exists('data/interactive_sampling_V2_data/ws.gpkg')){
+#   
+#   # Get watersheds in area.
+# ws = bcdc_query_geodata('freshwater-atlas-watershed-groups') |>
+#   filter(INTERSECTS(ss)) |>
+#   collect()
+#   
+#   sf::write_sf(ws, 'data/interactive_sampling_V2_data/ws.gpkg')
+# } else {
+#   ws = sf::read_sf('data/interactive_sampling_V2_data/ws.gpkg')
+# }
+
+# ws_borders = ws |>
+#   dplyr::summarise()
+
+# ws_borders_s = rmapshaper::ms_simplify(ws_borders)
+
+if(!file.exists('data/interactive_sampling_V2_data/big_rivers_in_ws.gpkg')){
+  # Nab large rivers in that area.
+  big_rivers_in_ws = bcdc_query_geodata('freshwater-atlas-stream-network') |> 
+    bcdata::filter(STREAM_ORDER > 5) |> 
+    bcdata::filter(INTERSECTS(ws_borders_s)) |> 
+    collect() |> 
+    sf::st_zm()
+  
+  big_rivers_in_ws = big_rivers_in_ws |> 
+    dplyr::group_by(GNIS_NAME, BLUE_LINE_KEY, STREAM_ORDER) |> 
+    dplyr::summarise() |> 
+    dplyr::ungroup()
+  
+  big_rivers_in_ws = sf::st_transform(big_rivers_in_ws, 4326)
+  
+  sf::write_sf(big_rivers_in_ws, 'data/interactive_sampling_V2_data/big_rivers_in_ws.gpkg')
+} else {
+  big_rivers_in_ws = sf::read_sf('data/interactive_sampling_V2_data/big_rivers_in_ws.gpkg')
+}
+
+# Map bbox based on watershed shapes.
+map_bb = st_bbox(sf::st_combine(big_rivers_in_ws))
+
+ss = sf::st_transform(ss, 4326)
+
+```
+
+```{r joining_results}
+# Clean up names so that results and proposed sampling sites match; defer to results excel.
+ss_c = ss |> 
+  dplyr::mutate(location_1 = stringr::str_to_title(location_1)) |> 
+  dplyr::mutate(location_1 = dplyr::case_when(
+    location_1 == 'Mainstem Gravels' & location_2 == 'Upper_Columbia_R1' ~ "Columbia River (Mainstem Gravels)",
+    str_detect(location_1, 'Burrell Creek') ~ 'Burrell Creek',
+    str_detect(location_1, 'Lynch Creek') ~ 'Lynch Creek',
+    location_1 %in% c("Kootenay","Kinbasket","Wood","Arrow","Okanagan") ~ paste0(location_1," Lake"),
+    location_1 == "Whiteswan" ~ "Outlet Creek of Whiteswan Lake",
+    location_1 == 'Mainstem Near Olson Pit' ~ "Elk River (Mainstem Near Sparwood)",
+    location_1 == "Yellowhead" ~ "Yellowhead Creek/Lake",
+    location_1 == "Kicking Horse River" ~ "Kicking Horse drive bridge",
+    T ~ location_1
+   )) |> 
+  dplyr::mutate(latitude = st_coordinates(geometry)[,2],
+                longitude = st_coordinates(geometry)[,1]) |> 
+  sf::st_drop_geometry()
+
+# Clean up the results excel sheet.
+sampling_res_c = sampling_res |> 
+  tidyr::as_tibble() |> 
+  dplyr::select(Reach,location_1 = `Sample.Name.(Site.name.+.replicate.#)`,
+                location_2 = Delivery.agency,
+                `Sampled.in.2024.(Y/N)`,Samples.taken,Region,
+                Sampling.status,
+                Lat,Long) |> 
+  dplyr::mutate(location_1 = stringr::str_to_title(location_1)) |> 
+  dplyr::mutate(location_1 = ifelse(location_1 == 'Outlet Creek Of Whiteswan Lake','Outlet Creek of Whiteswan Lake',location_1)) |> 
+  dplyr::select(location_1,location_2,Sampling.status,Lat,Long) |> 
+  dplyr::filter(!(location_1 == "Kootenay Lake" & is.na(location_2))) |> 
+  dplyr::mutate(Long = ifelse(location_1 == 'Kootenay Lake', -116.7774, Long),
+                Lat = ifelse(location_1 == 'Kootenay Lake', 49.39325, Lat))
+
+# For those rows missing coordinates, see if they are present in the original proposed sampling sites.
+sampling_res_c = sampling_res_c |> 
+  dplyr::mutate(is_in_ss = location_1 %in% unique(ss_c$location_1))
+
+# sampling_res_c |> 
+#   dplyr::filter(is.na(Lat)) |> 
+#   View()
+
+# Try to join Martina's excel sheet of sampling results onto the sample sites.
+sampling_res_c = sampling_res_c |> 
+  dplyr::left_join(
+    ss_c |> 
+      dplyr::select(location_1, latitude, longitude)
+  ) |> 
+  dplyr::mutate(Lat = dplyr::coalesce(Lat, latitude),
+                Long = dplyr::coalesce(Long, longitude)) |> 
+  dplyr::select(-c(latitude,longitude))
+
+
+# Okay, which rows still need coordinates?
+# sampling_res_c |> 
+#   dplyr::filter(is.na(Lat))
+
+supplemental_coords = data.frame(
+  location_1 = sampling_res_c[is.na(sampling_res_c$Lat),]$location_1,
+  Zone = c(11,11,11,11,11,NA,11,11,11,11,11,11,11,11,11,NA,NA),
+  Easting = c(494389,663598,643630,612132,590914,NA,527560.4,525595,451714.7,680470,355129,545337,566939,572137,304382,NA,NA),
+  Northing = c(5696822,5502734,5490085,5481174,5528860,NA,5437459.3,5443266.3,5454523.4,5439977,5434888,5638070,5599175,5589870,5662298,NA,NA)
+)
+
+supplemental_coords_wgs84 = supplemental_coords |> 
+  dplyr::filter(!is.na(Zone)) |> 
+  sf::st_as_sf(coords = c("Easting","Northing"), crs = 32611) |> 
+  sf::st_transform(crs = 4326) |> 
+  dplyr::mutate(longitude = st_coordinates(geometry)[,1],
+                latitude = st_coordinates(geometry)[,2]) |> 
+  sf::st_drop_geometry() |> 
+  dplyr::select(-Zone)
+
+sampling_res_sf = sampling_res_c |> 
+  dplyr::left_join(supplemental_coords_wgs84) |> 
+  dplyr::mutate(Lat = dplyr::coalesce(Lat, latitude),
+                Long = dplyr::coalesce(Long, longitude)) |> 
+  dplyr::select(-c(latitude,longitude)) |> 
+  dplyr::filter(!is.na(Lat)) |> 
+  sf::st_as_sf(coords = c("Long","Lat"), crs = 4326) |> 
+  dplyr::mutate(Sampling.status = str_squish(str_to_title(Sampling.status))) |> 
+  dplyr::mutate(marker_color = dplyr::case_when(
+    Sampling.status == 'Pending' ~ 'yellow',
+    Sampling.status == 'Not Sampled' ~ 'black',
+    Sampling.status == 'Positive' ~ 'red',
+    Sampling.status == 'Negative' ~ 'lightgreen',
+    T ~ 'cyan'
+  ))
+```
+
+```{r get_basemaps, include = FALSE}
+# natgeo_basemap = basemaps::basemap_terra(ext = sf::st_combine(sampling_res_sf), map_service = 'esri', map_type = 'natgeo_world_map')
+phys_basemap = basemaps::basemap_terra(ext = sf::st_buffer(sf::st_combine(sampling_res_sf),10000), map_service = 'esri', map_type = 'world_physical_map')
+```
+
+```{r make_static_map}
+
+yoho = bcdc_query_geodata('national-parks-of-canada-within-british-columbia') |> 
+  filter(ENGLISH_NAME == "Yoho National Park of Canada") |> 
+  collect() |> 
+  sf::st_transform(4326)
+  
+kootenay = bcdc_query_geodata('freshwater-atlas-lakes') |> 
+  filter(GNIS_NAME_1 == 'Kootenay Lake') |> 
+  collect() |> 
+  sf::st_transform(4326)
+
+emerald_lake = bcdc_query_geodata('freshwater-atlas-lakes') |> 
+  filter(GNIS_NAME_1 == 'Emerald Lake', WATERBODY_POLY_ID == 705013945) |> 
+  collect() |> 
+  sf::st_transform(4326)
+
+pos_sample_names = sampling_res_sf |> 
+  dplyr::filter(Sampling.status == "Positive") |> 
+  dplyr::select(location_1)
+
+map_frame = sf::st_as_sfc(sf::st_bbox(sf::st_buffer(sf::st_combine(sampling_res_sf),10000)))
+
+inset_map = ggplot() + 
+  # tidyterra::geom_spatraster_rgb(data = natgeo_basemap)
+  tidyterra::geom_spatraster_rgb(data = phys_basemap) + 
+  geom_sf(fill = 'grey',
+          alpha = 0.75,
+          data = sf::st_difference(map_frame, dplyr::summarise(col_watersh))) +
+  geom_sf(data = dplyr::summarise(col_watersh),
+          color = 'purple',
+          linewidth = 1,
+          fill = 'transparent') + 
+  geom_sf(data = yoho, color = 'gold', fill = 'gold') +
+  geom_sf(data = emerald_lake, color = 'darkorange', fill = 'transparent') +
+  geom_sf_label(data = emerald_lake,
+                label = "Emerald Lake\n2023 Detection",
+                nudge_x = 70000,
+                nudge_y = 30000,
+                col = 'darkorange') +
+  geom_sf(data = sf::st_buffer(sampling_res_sf,4000),
+          aes(fill = Sampling.status),
+          col = 'black',
+          alpha = 0.6) + 
+  # geom_sf_label(data = pos_sample_names,
+  #         aes(label = location_1)) +
+  # geom_sf_label(data = kootenay,
+  #               label = 'Kootney Lake') +
+  ggrepel::geom_label_repel(
+    data = pos_sample_names,
+    aes(label = location_1, geometry = geometry),
+    stat = "sf_coordinates",
+    min.segment.length = 0
+  ) +
+  ggrepel::geom_label_repel(
+    data = kootenay,
+    label = 'Kootenay Lake',
+    aes(geometry = geometry),
+    stat = "sf_coordinates",
+    min.segment.length = 0
+  ) +
+  labs(title = "Whirling Disease Sampling (2024-12-05)",
+       fill = "Status of Results") +
+  scale_fill_manual(values = c(
+    "Negative" = "lightgreen",
+    "Positive" = "red",
+    "Pending" = "yellow",
+    "Not Sampled" = "black"
+  )) +
+  theme(legend.position = 'bottom',
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank()) + 
+  ggspatial::annotation_scale() + 
+  coord_sf(expand = F)
+
+zoomed_out_map = ggplot() + 
+  geom_sf(data = bcmaps::bc_bound() |> dplyr::summarise() |> sf::st_transform(3857)) + 
+  # geom_sf(data = map_frame, color = 'black', fill = 'transparent') +
+  geom_sf(data = dplyr::summarise(col_watersh), col = 'purple', linewidth = 0.5) +
+  ggthemes::theme_map() + 
+  theme(plot.background = element_rect(color = 'black', fill = 'white'))
+```
+
+## Static Map
+
+```{r show_static_map, fig.width=10, fig.height=8}
+# Combine the maps
+inset_map +
+  inset_element(p = zoomed_out_map,
+                left = 0.7, right = 0.975,
+                top = 0.95, bottom = 0.7)
+
+ggsave(filename = paste0("J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Whirling_Disease_Sampling_Results_2024_12_05.jpg"),
+       plot = inset_map +
+  inset_element(p = zoomed_out_map,
+                left = 0.7, right = 0.975,
+                top = 0.95, bottom = 0.7),
+  width = 10, height = 8)
+```
+
+```{r make_crosstalk_object}
+# Make crosstalk object for sampling_res_sf
+sampling_res_sf_shared = SharedData$new(sampling_res_sf)
+```
+
+```{r make_map}
+
+# result_cols = leaflet::colorFactor(palette = 'Spectral',
+#                                domain = sampling_res_sf$Sampling.status)
+
+l = leaflet(elementId = 'map',
+            height = 600, width = 1000) |>
+  addTiles(group = 'Streets') |>
+  leaflet::addMapPane(name = 'rivers', zIndex = 300) |> 
+  leaflet::addMapPane(name = 'sample_sites', zIndex = 500) |> 
+  addProviderTiles(provider = providers$OpenTopoMap,
+                   options = providerTileOptions(opacity = 0.5),
+                   group = 'Topography') |>
+  addLayersControl(
+    position = 'bottomright',
+    baseGroups = c('Streets','Topography'),
+    overlayGroups = c('large rivers','sample sites'),
+    options = layersControlOptions(collapsed = F)
+  ) |> 
+  addScaleBar('bottomleft') |>
+  leaflet.extras::addResetMapButton()
+
+l = l |> 
+  addPolygons(
+    weight = 1,
+    data = st_transform(col_watersh |> dplyr::summarise(), 4326),
+    color = 'black',
+    fillColor = 'transparent'
+  ) |>
+  addPolylines(
+    data = big_rivers_in_ws,
+    label = ~paste0("River: ",GNIS_NAME),
+    weight = ~(STREAM_ORDER/5)^2,
+    color = 'darkblue',
+    opacity = 0.75,
+    options = pathOptions(pane = 'rivers'),
+    group = 'large rivers'
+  ) |> 
+  addCircleMarkers(
+    data = sampling_res_sf_shared,
+    label = ~paste0("Sampling Location: ",location_1," (",location_2,")"),
+    radius = 5,
+    weight = 1,
+    color = 'black',
+    fillColor = ~marker_color,
+    # fillColor = ~result_cols(Sampling.status),
+    opacity = 1,
+    fillOpacity = 0.8,
+    options = pathOptions(pane = 'sample_sites'),
+    group = 'sample sites'
+  ) |>
+  # # Add Parks Canada points
+  # addCircleMarkers(
+  #   data = pc,
+  #   radius = 5,
+  #   weight = 1,
+  #   color = 'black',
+  #   fillColor = '#DB9',
+  #   opacity = 1,
+  #   fillOpacity = 0.8,
+  #   options = pathOptions(pane = 'Parks_Canada'),
+  #   group = 'Parks Canada'
+  # ) |> 
+  # addLegend(title = "Parks Canada Sampling Locations",
+  #           position = 'bottomleft',
+  #           colors = "#DB9", 
+  #           labels = "") |> 
+  addLegend(title = "Sample Result",
+            position = 'bottomleft',
+            # pal = result_cols,
+            colors = c("red","yellow","lightgreen","black"),
+            labels = c("Positive","Pending","Negative","Not Sampled")
+  )
+            # values = sampling_res_sf$Sampling.status)
+```
+
+## Interactive Map 
+
+```{r print_map, out.width=1000, out.height=600}
+
+method_filters = crosstalk::filter_checkbox(
+    id = 'method_f', 
+    label = 'Sample Results',
+    sharedData = sampling_res_sf_shared,
+    ~Sampling.status,
+    inline = F)
+
+l
+```
+
+```{r print_crosstalk_boxes}
+bscols(
+  # widths = c(5,4,3),
+  widths = 12,
+  method_filters#,
+  # delivery_filters,
+  # priority_filters
+)
+```
+
+<br>
+
+(Note: If no check-box is selected for a given variable, all levels of that variable in the data will be plotted.)
+
+<br>
+<br>
+<br>
+
+## Interactive Table
+
+```{r interactive_dt,  out.width="1200px", out.height = "600px"}
+DT::datatable(sampling_res_sf_shared,
+              options = list(
+                'pageLength' = '16'
+              ))
+```
+
