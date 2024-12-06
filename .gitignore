@@ -16,4 +16,5 @@ scripts/*.html
 *.html
 *.xlsx
 *.csv
+*.rds
 scripts/images/*

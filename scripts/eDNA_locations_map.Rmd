@@ -1,0 +1,88 @@
+---
+title: "eDNA Locations Map"
+author: "Chris Madsen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+```
+
+```{r bring_in_data}
+library(tidyverse)
+library(sf)
+library(readxl)
+library(leaflet)
+library(crosstalk)
+
+majriv = sf::read_sf('../data/interactive_eDNA_data/big_rivers_in_ws.gpkg')
+
+col = sf::read_sf('W:/CMadsen/shared_data_sets/Columbia_River_Big_Watershed.gpkg') |> 
+  dplyr::mutate(row_id = row_number()) |> 
+  dplyr::mutate(MAJOR_WA_1 = ifelse(row_id == 10, "Pend-d'Oreille River West", MAJOR_WA_1)) |> 
+  dplyr::mutate(MAJOR_WA_1 = ifelse(row_id == 9, "Pend-d'Oreille River East", MAJOR_WA_1)) |> 
+  dplyr::group_by(MAJOR_WA_1) |> 
+  dplyr::summarise() |> 
+  sf::st_transform(4326)
+
+d = read_excel('../data/2024 - eDNA site coordinates_for mapping.xlsx') |> 
+  dplyr::filter(!is.na(Easting))
+
+d = d |> 
+  dplyr::mutate(Reach = as.character(Reach)) |> 
+  dplyr::mutate(Reach = replace_na(Reach, "No Data"))
+
+dsf = st_as_sf(d, coords = c("Easting","Northing"), crs = 32611) |> 
+  sf::st_transform(4326)
+
+dsd = SharedData$new(dsf)
+
+```
+
+### Interactive Map of eDNA Sampling Sites
+```{r}
+
+lpal = leaflet::colorFactor(
+  palette = "Paired",
+  domain = dsf$Reach
+)
+
+l = leaflet() |> 
+  addTiles() |> 
+  addPolygons(
+    data = col,
+    color = 'grey',
+    weight = 1.5,
+    label = ~paste0("Watershed: ",MAJOR_WA_1)
+  ) |> 
+  addPolylines(
+    data = majriv,
+    color = 'darkblue',
+    opacity = 1,
+    weight = 3,
+    label = ~paste0("Major River: ",GNIS_NAME)
+  ) |> 
+  addCircleMarkers(
+    data = dsd,
+    color = 'black',
+    weight = 2,
+    fillColor = ~lpal(Reach),
+    fillOpacity = 0.90,
+    label = ~paste0(Location1, " (Reach ",Reach,")")
+  ) |> 
+  addLegend(title = "Reach", pal = lpal, values = unique(dsf$Reach)) |> 
+  leaflet.extras::addResetMapButton()
+
+dt = DT::datatable(data = sf::st_drop_geometry(dsd))
+```
+
+```{r}
+bscols(
+  list(
+    l,
+    dt
+  )
+)
+```
+

@@ -1,11 +1,11 @@
 ---
-title: "Waterbody Connectivity across Watersheds"
+title: "Waterbody Connectivity across Watersheds + Whirling Disease Susceptible Species"
 author: "Chris Madsen"
 date: "`r Sys.Date()`"
 output: html_document
 ---
 
-This document assesses the connectivity and flow direction of streams and rivers that flow from the watershed 08N to the target watersheds 08P, 08M, 08L and 08K.
+This document assesses the connectivity and flow direction of streams and rivers that flow from the watershed 08N to the target watersheds 08P, 08M, 08L and 08K. It also visualizes a layer of Whirling Disease susceptible species (mostly salmonids).
 
 ## Results
 
@@ -27,11 +27,27 @@ library(ggraph)
 # BC boundary polygon
 bc = bcmaps::bc_bound() |> dplyr::summarise()
 
+# Whirling Disease sensitive Species
+if(!file.exists('data/whirling_disease_susceptible_species_occ_data.rds') & !file.exists('../data/whirling_disease_susceptible_species_occ_data.rds')){
+  source("pull_whirling_disease_susceptible_species_records.R")
+}
+
+# if(file.exists("data/whirling_disease_susceptible_species_occ_data.rds")){
+#   wd_sus = readRDS("data/whirling_disease_susceptible_species_occ_data.rds")
+# } else {
+#   wd_sus = readRDS("../data/whirling_disease_susceptible_species_occ_data.rds")
+# }
+if(file.exists("output/whirling_disease_susceptible_species_distribution_rasters.rds")){
+  wd_sus = readRDS("output/whirling_disease_susceptible_species_distribution_rasters.rds")
+} else {
+  wd_sus = readRDS("../output/whirling_disease_susceptible_species_distribution_rasters.rds")
+}
+
 # Watershed drainages
 wscd = bcmaps::wsc_drainages()
 
 # Waterbodies with visitation by boats from Invasive Mussel Defence Program inspection data.
-vis = sf::read_sf("C:/Users/CMADSEN/Downloads/LocalR/long_term_projects/CNF/data/Waterbodies_with_binned_and_original_values.gpkg")
+vis = sf::read_sf("C:/Users/CMADSEN/OneDrive - Government of BC/data/CNF/Waterbodies_with_binned_and_original_values.gpkg")
 
 # Merge by SUB_DRAINAGE_AREA_CD
 wscd_s = wscd |> 
@@ -330,7 +346,7 @@ Note that the present analysis does not (yet) include assessments of flow direct
 
 ### Interactive Plot with Stream Networks and Streams Touching Watershed Borders Marked
 
-Note: Only hydrological networks with 100 or more streams are shown in this map, and very small streams of stream order 1 and 2 are not shown on this map; however, the connectivity analysis included all streams / rivers / lakes in B.C.
+Note: Only hydrological networks with 100 or more streams are shown in this map, only streams in the Fraser and Columbia River Watersheds are displayed, and very small streams of stream order 1 and 2 are not shown on this map; however, the connectivity analysis included all streams / rivers / lakes in B.C.
 
 Note: Watershed borders were buffered by 100 meters and any streams that intersected with this buffered layer were considered to touch the watershed border.
 
@@ -975,7 +991,11 @@ major_highways = bcdc_query_geodata('digital-road-atlas-dra-master-partially-att
 ```
 
 ```{r read_in_tubifex_raster_and_make_legend}
-tub_prob_w_carbon = terra::rast('../output/Predicted_Ttubifex_density.tif')
+if(file.exists('output/Predicted_Ttubifex_density.tif')) {
+  tub_prob_w_carbon = terra::rast('output/Predicted_Ttubifex_density.tif')
+} else {
+  tub_prob_w_carbon = terra::rast('../output/Predicted_Ttubifex_density.tif')
+}
 
 tub_w_c_as_df = as.data.frame(tub_prob_w_carbon, xy = TRUE)
 
@@ -991,19 +1011,22 @@ raster_pal_legend = leaflet::colorNumeric(
   reverse = T,
   domain = unique(terra::values(tub_prob_w_carbon)),
   na.color = 'white')
+
 ```
 
-### Invasive Mussel Defence Program Boat Inspections {.tabset}
+### Waterbody Visitation, **T. tubifex** predicted density, Major Highways, and Whirling Disease susceptible fish {.tabset}
 
 Map details:
 
--   Inspection data span 2015 to present.
+-   Invasive Mussel Defence Program inspection data span 2015 to present.
 
 -   This map only includes inspections of boats coming from Whirling Disease-infected states or provinces/territories in the USA and Canada, respectively. The number of inspections from these infected areas may be artificially high, as ALL inspections from, e.g., Alberta are included, not only inspections from infected waterbodies within Alberta.
 
 -   It also shows only those destination water bodies with 1000 or more inspections.
 
-#### Destination Waterbodies
+-   The list of Whirling Disease susceptible fish species was accessed from the provincial government website [here](https://www2.gov.bc.ca/gov/content/environment/plants-animals-ecosystems/fish/aquatic-species/aquatic-invasives/whirling-disease), under the header "*Lifecycle*". The occurrence data 
+
+#### Map with listed layers
 
 Note: roads are displayed in pink, and key fishing locations are presented in purple.
 
@@ -1049,11 +1072,69 @@ em_popup_tbl = leafpop::popupTable(
                   Very_Complex_Counter,Non_Motorized_Counter)
 )
 
-leaflet::leaflet() |> 
+all_wd_sus_sp = c(wd_sus |> 
+  lapply(\(x) names(x)) |> 
+  unlist())
+
+all_groups_for_overlay = unique(c('highways','key fishing waterbodies','probability_raster',all_wd_sus_sp))
+
+library(pals)
+
+# wd_sus_sp_pal = leaflet::colorNumeric(pals::alphabet(),
+#                       domain = 1:length(all_wd_sus_sp),
+#                       na.color = 'transparent')
+wd_sus_sp_pal = leaflet::colorFactor(pals::alphabet(),
+                      domain = all_wd_sus_sp,
+                      na.color = 'transparent')
+
+# # Filter wd_sus for fraser/columbia area
+# fras = sf::read_sf("W:/CMadsen/shared_data_sets/Fraser_River_Big_Watershed.shp")
+# columbia = sf::read_sf("W:/CMadsen/shared_data_sets/Columbia_River_Big_Watershed.shp")
+# fras_col = dplyr::bind_rows(fras, columbia) |> 
+#   dplyr::summarise() |> 
+#   sf::st_transform(4326)
+# 
+# wd_sus_fras_col = wd_sus |> 
+#   sf::st_intersection(fras_col)
+
+# # Whirling disease susceptible fish species - point data
+# wd_sp_points = wd_sus_fras_col |> dplyr::filter(sf::st_geometry_type(geom) == "POINT")
+# wd_sp_multip = wd_sus_fras_col |> dplyr::filter(sf::st_geometry_type(geom) == "MULTIPOLYGON")
+
+# wd_sp_pal = leaflet::colorFactor(palette = "Set2", domain = unique(wd_sus_fras_col$Species))
+
+l = leaflet::leaflet() |> 
   leaflet::addTiles(group = 'openstreetmap') |>
   leaflet::addProviderTiles(provider = leaflet::providers$CartoDB, group = 'carto') |> 
   addMapPane(name = 'raster_pane', zIndex = 250) |> 
-  leaflet::addPolygons(
+  addMapPane(name = 'highway_pane', zIndex = 400) |> 
+  addMapPane(name = 'dest_waterbodies', zIndex = 450) |> 
+  addMapPane(name = 'wd_species', zIndex = 500) 
+
+
+for(i in 1:length(wd_sus)){
+  
+  l = l |>
+  # l |>
+    # leaflet::addRasterImage(
+    #   colors = wd_sus_sp_pal,
+    #   x = wd_sus[i],
+    #   group = names(wd_sus[i]),
+    #   opacity = 0.75,
+    #   options = pathOptions(pane = 'wd_species')
+    # )
+    leaflet::addRasterImage(
+      colors = wd_sus_sp_pal(names(wd_sus[i])),
+      x = wd_sus[i],
+      group = names(wd_sus[i]),
+      opacity = 0.75,
+      options = pathOptions(pane = 'wd_species')
+    ) |> 
+    leaflet::hideGroup(names(wd_sus[i]))
+}
+
+
+l |> leaflet::addPolygons(
     data = ws,
     color = 'grey',
     fillColor = 'transparent'
@@ -1062,7 +1143,8 @@ leaflet::leaflet() |>
     data = major_highways,
     color = 'pink',
     opacity = 1,
-    group = 'highways'
+    group = 'highways',
+    options = pathOptions(pane = "highway_pane")
   ) |> 
   leaflet::addPolygons(
     data = sf::st_transform(em_lake, 4326),
@@ -1078,7 +1160,8 @@ leaflet::leaflet() |>
     fillColor = ~my_pal(TotalInspections),
     color = ~my_pal(TotalInspections),
     opacity = 0.75,
-    fillOpacity = 0.75
+    fillOpacity = 0.75,
+    options = pathOptions(pane = "dest_waterbodies")
   ) |> 
   leaflet::addPolylines(
     data = fishing_wbs[st_geometry_type(fishing_wbs$geometry) %in% c('LINESTRING','MULTILINESTRING'),],
@@ -1110,6 +1193,20 @@ leaflet::leaflet() |>
     opacity = 0.5,
     options = pathOptions(pane = 'raster_pane')
     ) |> 
+  # leaflet::addCircleMarkers(
+  #   data = wd_sp_points,
+  #   color = ~wd_sp_pal(Species),
+  #   group = "WD susceptible sp.",
+  #   options = pathOptions(pane = "wd_species")
+  # ) |> 
+  #  leaflet::addPolygons(
+  #   data = wd_sp_multip,
+  #   color = 'black',
+  #   weight = 1,
+  #   fillColor = ~wd_sp_pal(Species),
+  #   group = "WD susceptible sp.",
+  #   options = pathOptions(pane = "wd_species")
+  # ) |> 
   leaflet::addLegend(
     title = "<em>T. tubifex</em><br>predicted<br> density<br>",
     pal = raster_pal_legend,
@@ -1121,16 +1218,23 @@ leaflet::leaflet() |>
     pal = my_pal,
     values = over_1000$TotalInspections
   ) |> 
+  leaflet::addLegend(
+    title = "Whirling Disease<br>Susceptible Sp.",
+    position = 'topleft',
+    pal = wd_sus_sp_pal,
+    # values = 1:length(all_wd_sus_sp)
+    values = all_wd_sus_sp
+  ) |> 
   leaflet::addScaleBar(position = 'bottomright') |> 
   leaflet.extras::addResetMapButton() |> 
   leaflet::addLayersControl(position = 'bottomleft',
                             baseGroups = c('carto','openstreetmap'),
-                            overlayGroups = c('highways','key fishing waterbodies','probability_raster'),
-                            options = leaflet::layersControlOptions(collapsed = F))
+                            overlayGroups = all_groups_for_overlay,
+                            options = leaflet::layersControlOptions(collapsed = T))
 
 ```
 
-#### Source Locations
+#### Whirling Disease Source Locations
 
 ```{r}
 if(!file.exists('../data/pascale/whirling_disease_infected_areas.gpkg')){

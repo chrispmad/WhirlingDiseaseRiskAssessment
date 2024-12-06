@@ -42,10 +42,16 @@ ggplot() +
 
 library(leaflet)
 
+ss_c = ss |> sf::st_transform(crs = 4326) |>
+  dplyr::mutate(
+  lat = round(st_coordinates(geometry)[,2],3),
+  lng = round(st_coordinates(geometry)[,1],3)
+  )
+
 leaflet() |>
   addTiles() |>
-  addMarkers(data = sf::st_transform(ss, 4326),
-             label = ~location_1)
+  addMarkers(data = sf::st_transform(ss_c, 4326),
+             label = ~paste0(location_1,"\n(",lat,",",lng,")"))
 
 sample_bbox = st_bbox(st_buffer(st_as_sfc(sf::st_bbox(ss)), 10000))
 

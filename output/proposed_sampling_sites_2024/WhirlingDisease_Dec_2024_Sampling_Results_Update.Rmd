@@ -37,7 +37,12 @@ ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_location
   purrr::set_names(snakecase::to_snake_case)
 
 # Join on Martina's results excel file.
-sampling_res = read.xlsx('J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Surveillance plan/2024 surveillance plan/2024 WD sampling locations and results_FINAL.xlsx')
+sampling_res = read.xlsx('J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Surveillance plan/2024 surveillance plan/2024 WD sampling locations and results_FINAL.xlsx') |> 
+  tidyr::as_tibble()
+
+# Update results for Duck Creek
+sampling_res = sampling_res |> 
+  dplyr::mutate(Sampling.status = ifelse(`Sample.Name.(Site.name.+.replicate.#)` == 'Duck Creek','Positive',Sampling.status))
 
 # Alouette is in a different CRS. Convert.
 al = ss |> 
