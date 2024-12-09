@@ -7,7 +7,7 @@ output: html_document
 
 ## Description: 
 
-This script produces a static map and an interactive map of Whirling Disease sampling results, as of 2024-12-05 (December 5th). This document was produced on `r format(Sys.Date(),"%B %d, %Y")`.
+This script produces a static map and an interactive map of Whirling Disease sampling results, as of 2024-12-09 (December 5th). This document was produced on `r format(Sys.Date(),"%B %d, %Y")`.
 
 <br>
 <br>
@@ -36,9 +36,15 @@ ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_location
   tidyr::as_tibble() |>
   purrr::set_names(snakecase::to_snake_case)
 
-# Join on Martina's results excel file.
-sampling_res = read.xlsx('J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Surveillance plan/2024 surveillance plan/2024 WD sampling locations and results_FINAL.xlsx') |> 
-  tidyr::as_tibble()
+# # Join on Martina's results excel file. Looks like they've moved it and renamed it with new columns? Fantastic.
+# sampling_res = read.xlsx('J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Surveillance plan/2024 surveillance plan/2024 WD sampling locations and results_FINAL.xlsx') |> 
+  # tidyr::as_tibble()
+
+sampling_res = read.xlsx("J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Monitoring/2024/Results/2024 WD sampling locations and results_MASTER LIST.xlsx")
+
+# Change column names to what they were in the previous excel file so that the
+# following code works.
+sampling_res = sampling_res |> dplyr::rename(Sampling.status = Fish.sampling.results)
 
 # Update results for Duck Creek
 sampling_res = sampling_res |> 
@@ -156,12 +162,12 @@ sampling_res_c = sampling_res_c |>
 sampling_res_c = sampling_res_c |> 
   dplyr::left_join(
     ss_c |> 
-      dplyr::select(location_1, latitude, longitude)
+      dplyr::select(location_1, latitude, longitude) |> 
+      dplyr::distinct()
   ) |> 
   dplyr::mutate(Lat = dplyr::coalesce(Lat, latitude),
                 Long = dplyr::coalesce(Long, longitude)) |> 
   dplyr::select(-c(latitude,longitude))
-
 
 # Okay, which rows still need coordinates?
 # sampling_res_c |> 
@@ -183,6 +189,12 @@ supplemental_coords_wgs84 = supplemental_coords |>
   sf::st_drop_geometry() |> 
   dplyr::select(-Zone)
 
+# Ensure that we have proper levels for the results field.
+sampling_res_c = sampling_res_c |> 
+  dplyr::mutate(Sampling.status = stringr::str_to_title(Sampling.status)) |> 
+  dplyr::mutate(Sampling.status = stringr::str_remove_all(Sampling.status," \\(.*")) |> 
+  dplyr::mutate(Sampling.status = factor(Sampling.status, levels = c("Positive","Pending","Negative","Not Sampled")))
+
 sampling_res_sf = sampling_res_c |> 
   dplyr::left_join(supplemental_coords_wgs84) |> 
   dplyr::mutate(Lat = dplyr::coalesce(Lat, latitude),
@@ -197,7 +209,8 @@ sampling_res_sf = sampling_res_c |>
     Sampling.status == 'Positive' ~ 'red',
     Sampling.status == 'Negative' ~ 'lightgreen',
     T ~ 'cyan'
-  ))
+  )) |> 
+  dplyr::distinct()
 ```
 
 ```{r get_basemaps, include = FALSE}
@@ -300,7 +313,7 @@ inset_map +
                 left = 0.7, right = 0.975,
                 top = 0.95, bottom = 0.7)
 
-ggsave(filename = paste0("J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Whirling_Disease_Sampling_Results_2024_12_05.jpg"),
+ggsave(filename = paste0("J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Whirling_Disease_Sampling_Results_",Sys.Date(),".jpg"),
        plot = inset_map +
   inset_element(p = zoomed_out_map,
                 left = 0.7, right = 0.975,
