@@ -30,6 +30,8 @@ library(patchwork)
 ```{r get_data}
 
 setwd(here::here())
+onedrive_wd = paste0(str_extract(getwd(),"C:/Users/[A-Z]+/"),"OneDrive - Government of BC/data/")
+lan_root = "//SFP.IDIR.BCGOV/S140/S40203/RSD_ FISH & AQUATIC HABITAT BRANCH/General/"
 
 # Load in sampling site data.
 ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_locations') |>
@@ -40,7 +42,7 @@ ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_location
 # sampling_res = read.xlsx('J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Surveillance plan/2024 surveillance plan/2024 WD sampling locations and results_FINAL.xlsx') |> 
   # tidyr::as_tibble()
 
-sampling_res = read.xlsx("J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Monitoring/2024/Results/2024 WD sampling locations and results_MASTER LIST.xlsx")
+sampling_res = read.xlsx(paste0(lan_root,"2 SCIENCE - Invasives/SPECIES/Whirling Disease/Monitoring/2024/Results/2024 WD sampling locations and results_MASTER LIST.xlsx"))
 
 # Change column names to what they were in the previous excel file so that the
 # following code works.
@@ -70,7 +72,7 @@ ss = dplyr::bind_rows(ss, al)
 sample_bbox = st_bbox(st_buffer(st_as_sfc(sf::st_bbox(ss)), 10000))
 
 # Get Columbia Watershed outline.
-col_watersh = sf::read_sf("W:/CMadsen/shared_data_sets/columbia_watershed_priority_area.gpkg")
+col_watersh = sf::read_sf(paste0(onedrive_wd,"CNF/columbia_watershed_priority_area.gpkg"))
 
 # if(!file.exists('data/interactive_sampling_V2_data/ws.gpkg')){
 #   
@@ -313,7 +315,7 @@ inset_map +
                 left = 0.7, right = 0.975,
                 top = 0.95, bottom = 0.7)
 
-ggsave(filename = paste0("J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Whirling_Disease_Sampling_Results_",Sys.Date(),".jpg"),
+ggsave(filename = paste0(lan_root,"2 SCIENCE - Invasives/SPECIES/Whirling Disease/Whirling_Disease_Sampling_Results_",Sys.Date(),".jpg"),
        plot = inset_map +
   inset_element(p = zoomed_out_map,
                 left = 0.7, right = 0.975,
