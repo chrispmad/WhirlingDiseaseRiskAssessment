@@ -42,7 +42,20 @@ ss = read.xlsx('data/2024 Sampling Sites_DRAFT1.xlsx', sheet = 'Mapping_location
 # sampling_res = read.xlsx('J:/2 SCIENCE - Invasives/SPECIES/Whirling Disease/Surveillance plan/2024 surveillance plan/2024 WD sampling locations and results_FINAL.xlsx') |> 
   # tidyr::as_tibble()
 
-sampling_res = read.xlsx(paste0(lan_root,"2 SCIENCE - Invasives/SPECIES/Whirling Disease/Monitoring/2024/Results/2024 WD sampling locations and results_MASTER LIST.xlsx"))
+# sampling_res = read.xlsx(paste0(lan_root,"2 SCIENCE - Invasives/SPECIES/Whirling Disease/Monitoring/2024/Results/2024 WD sampling locations and results_MASTER LIST.xlsx"))
+
+# sampling_res = read.xlsx(paste0(lan_root,"2 SCIENCE - Invasives/SPECIES/Whirling Disease/Monitoring/2024/Results/2024 WD sampling results_fish_eDNA_MASTER LIST.xlsx")) |>
+#   tidyr::as_tibble()
+
+# Saved that LAN file to my local folder to prevent any future muck-ups.
+if(interactive()){
+  sampling_res = read.xlsx("output/proposed_sampling_sites_2024/excel_files/2024 WD sampling results_fish_eDNA_MASTER LIST.xlsx") |>
+  tidyr::as_tibble()
+} else {
+  sampling_res = read.xlsx("excel_files/2024 WD sampling results_fish_eDNA_MASTER LIST.xlsx") |>
+  tidyr::as_tibble()
+}
+
 
 # Change column names to what they were in the previous excel file so that the
 # following code works.
