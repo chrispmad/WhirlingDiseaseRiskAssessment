@@ -27,7 +27,7 @@ usa_c = sf::st_intersection(
 
 infected_states = c("AK","AZ","CA","CO","CT","ID","MD","NE","NV",
                     "NH","NJ","NM","NY","OH","OR","PA","UT","VA",
-                    "WA","WV","WY")
+                    "WA","WV","WY","MT")
 
 usa_wd = usa_c |>
   dplyr::mutate(orig_inf = STUSPS %in% c("WA","OR","CA","NV","ID","MT","WY","CO","UT","AZ","NM","NE",
@@ -66,9 +66,11 @@ p = ggplot() +
   ggthemes::theme_map() +
   theme(legend.position.inside = c(0,0.25)) +
   ggspatial::annotation_scale() +
-  labs(fill = 'Whirling Disease', title = "Whirling Disease Distribution (2024)",
+  labs(fill = 'Whirling Disease', title = "Whirling Disease Distribution (2025)",
        subtitle = "based on Elwell et al. (2009)")
 
-ggsave(filename = 'output/whirling_disease_distribution_2024.jpeg',
+p
+
+ggsave(filename = 'output/whirling_disease_distribution_2025.jpeg',
        plot = p,
        width = 8, height = 6)
