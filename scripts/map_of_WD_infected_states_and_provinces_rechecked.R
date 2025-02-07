@@ -45,7 +45,7 @@ canada_wd = canada |>
 
 wd = dplyr::bind_rows(usa_wd, canada_wd) |>
   dplyr::mutate(status = 'Whirling Disease Detected') |>
-  dplyr::mutate(status = ifelse(name == 'BC','New Detection (2023)',status))
+  dplyr::mutate(status = ifelse(name == 'BC','First Detection in 2023',status))
 
 ggplot() +
   geom_sf(data = usa_c) +
@@ -62,7 +62,7 @@ p = ggplot() +
   geom_sf(data = canada) +
   geom_sf(data = wd[wd$new_inf,], aes(fill = status)) +
   scale_fill_manual(values = c('Whirling Disease Detected' = 'purple',
-                               'New Detection (2023)' = 'orange')) +
+                               'First Detection in 2023' = 'orange')) +
   ggthemes::theme_map() +
   theme(legend.position.inside = c(0,0.25)) +
   ggspatial::annotation_scale() +
