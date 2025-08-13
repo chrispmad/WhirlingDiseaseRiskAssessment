@@ -1,7 +1,7 @@
 library(tidyverse)
 library(sf)
 
-col = sf::read_sf('W:/CMadsen/shared_data_sets/Columbia_River_Big_Watershed.gpkg') |>
+col = sf::read_sf('//SFP.IDIR.BCGOV/S140/S40203/WFC AEB/General/2 SCIENCE - Invasives/AIS_R_Projects/CMadsen_Wdrive/shared_data_sets/Columbia_River_Big_Watershed.gpkg') |>
   dplyr::summarise(area = 'Columbia River Watershed')
 
 bc = bcmaps::bc_bound() |>
